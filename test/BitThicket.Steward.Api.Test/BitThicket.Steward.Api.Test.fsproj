@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <RootNamespace>BitThicket.SimpleFid.Api.Test</RootNamespace>
+    <RootNamespace>BitThicket.Steward.Api.Test</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,7 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\BitThicket.SimpleFid.Api\BitThicket.SimpleFid.Api.fsproj" />
+    <ProjectReference Include="..\..\src\BitThicket.Steward.Api\BitThicket.Steward.Api.fsproj" />
   </ItemGroup>
 
 </Project>

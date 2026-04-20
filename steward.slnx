@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BitThicket.Steward.Api/BitThicket.Steward.Api.fsproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/BitThicket.Steward.Api.Test/BitThicket.Steward.Api.Test.fsproj" />
+  </Folder>
+</Solution>
