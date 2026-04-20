@@ -16,22 +16,46 @@ AI-first personal finance tool for budgeting and expense tracking.
 ```
 src/
   BitThicket.Steward.Api/
-    Domain.fs        -- Core domain types: Account, Transaction, Budget
+    Domain.fs        -- Core domain types
     Program.fs       -- HTTP routes and app entry point
 test/
   BitThicket.Steward.Api.Test/
     Tests.fs         -- Test suite
+docs/
+  adr/               -- Architecture Decision Records
 ```
 
-### Domain Model
+## Domain Model
 
-**Account** — a financial account (checking, savings, credit card, investment, cash) denominated in a specific currency.
+### Core Concepts
 
-**Transaction** — a debit, credit, or transfer against an account with an amount, optional category, and timestamp.
+**Currency** — Supports fiat (USD) and crypto (BTC) with appropriate decimal precision. Accounts are single-currency; cross-currency transfers are modeled as linked transactions.
 
-**Budget** — a spending limit for a category over a period (monthly, weekly, or custom date range).
+**Account** — A financial account (checking, savings, credit card, investment, loan, cash) denominated in a specific currency. Optionally linked to an external data feed. Credit card accounts carry additional metadata (limit, statement balance, due date).
 
-All monetary values use a `Money` record (decimal amount + currency code) to avoid unit confusion.
+**Transaction** — A financial event on a single account with a signed amount. Tracks its source (manual, data feed, import), status (pending → cleared → reconciled), and optional category. Supports matching between manual entries and feed data via `MatchedTransactionId`.
+
+**Category** — Hierarchical spending categories for transaction classification and budget allocation.
+
+**Budget** — A named spending plan with a chosen style (zero-based or traditional limits) and period. Contains per-category allocations with optional rollover.
+
+**CreditCardPayment** — Models the payment flow from a funding account to a credit card, generating linked debit/credit transactions.
+
+**DataFeedConnection** — Represents a link to an external data provider (SimpleFin, Plaid). Tracks connection health and sync history.
+
+**Reconciliation** — A session for verifying account records against a bank statement.
+
+### Design Principles
+
+1. **Single-entry with transfer links** — One transaction per account per real-world event. Transfers link two transactions. Simpler UX than double-entry while maintaining integrity. (See [ADR-001](docs/adr/001-single-entry-with-transfer-links.md))
+
+2. **Multi-currency from day one** — USD and BTC supported with extensibility for more. No mixed-currency accounts. (See [ADR-002](docs/adr/002-multi-currency-model.md))
+
+3. **Reconciliation via matching** — Manual entries are matched against feed data automatically, with manual reconciliation for statement verification. (See [ADR-003](docs/adr/003-reconciliation-via-transaction-matching.md))
+
+4. **Flexible budgeting** — User chooses their style. Rollover is per-category, not global. (See [ADR-004](docs/adr/004-flexible-budgeting-with-rollover.md))
+
+5. **Provider-agnostic data feeds** — Domain defines the sync contract; provider adapters implement it. Sync frequency is a user preference bounded by provider capability. (See [ADR-005](docs/adr/005-data-feed-abstraction.md))
 
 ## Getting Started
 
@@ -41,10 +65,3 @@ dotnet build
 dotnet run --project src/BitThicket.Steward.Api
 dotnet test
 ```
-
-## Key Decisions
-
-1. **F# + Falco over heavier frameworks** — Bias toward shipping fast. Falco is a thin wrapper over ASP.NET Core; we get full .NET ecosystem access without framework lock-in.
-2. **Domain types first** — Define the core model before adding persistence. This lets us iterate on the API shape without migration churn.
-3. **Algebraic types for variants** — `AccountType`, `TransactionKind`, and `BudgetPeriod` are discriminated unions. The compiler enforces exhaustive handling — no forgotten cases.
-4. **Defer persistence** — Start with in-memory or simple file-based state. Pick a database when the access patterns are clearer.
