@@ -1,4 +1,4 @@
-module BitThicket.SimpleFid.Api.Test.Tests
+module BitThicket.Steward.Api.Test.Tests
 
 open Xunit
 open Swensen.Unquote
