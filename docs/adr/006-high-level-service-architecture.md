@@ -8,7 +8,8 @@ Proposed
 
 Steward needs a system architecture that supports:
 
-1. **Separate aggregator ingestion services** — each financial data provider (Akoya, MX, SimpleFin, Plaid) runs as an independent service, decoupled from the core ledger.
+1. **Separate aggregator ingestion services** — each financial data provider (Akoya, Plaid, MX, etc.) runs as an independent service, decoupled from the core ledger.
+5. **Frequent re-syncs** — the system must support high-frequency transaction syncing (multiple times per day or on-demand), which requires providers with real-time or near-real-time API access. This rules out providers like SimpleFin that only support periodic batch pulls.
 2. **A public API and MCP server** as the flagship product — AI agents and third-party clients are first-class consumers.
 3. **A lightweight customer portal** — not a rich first-party client, just enough for transaction viewing and account management. Users primarily interact through AI agents or their own clients.
 4. **Cost-conscious hosting** — the architecture should be deployable on modest infrastructure and scale incrementally.
@@ -33,10 +34,9 @@ graph TB
     end
 
     subgraph Ingestion["Ingestion Services"]
-        SF["SimpleFin<br/>Ingestion"]
         AK["Akoya<br/>Ingestion"]
-        MX["MX<br/>Ingestion"]
         PL["Plaid<br/>Ingestion"]
+        MX["MX<br/>Ingestion"]
     end
 
     subgraph Infra["Shared Infrastructure"]
@@ -51,20 +51,17 @@ graph TB
     API --> DB
     API --> Q
 
-    SF --> API
     AK --> API
-    MX --> API
     PL --> API
+    MX --> API
 
-    SF --> VS
     AK --> VS
-    MX --> VS
     PL --> VS
+    MX --> VS
 
-    Q -.->|sync triggers| SF
     Q -.->|sync triggers| AK
-    Q -.->|sync triggers| MX
     Q -.->|sync triggers| PL
+    Q -.->|sync triggers| MX
 ```
 
 ### Component Responsibilities
@@ -76,7 +73,7 @@ Each aggregator gets its own service/process:
 - **Owns** the provider SDK/API integration, credential management, and rate-limit handling.
 - **Translates** provider-specific transaction formats into the canonical domain types (`Transaction`, `SyncEvent`).
 - **Pushes** normalized data to the Core API via its internal endpoints.
-- **Receives** sync trigger messages from the message bus (scheduled or on-demand).
+- **Receives** sync trigger messages from the message bus (scheduled at high frequency or on-demand).
 - **Reports** health and sync status back through `SyncEvent` records.
 
 Separate services per provider means:
@@ -196,7 +193,7 @@ The message bus carries lightweight event envelopes for async coordination:
 
 | Event | Producer | Consumers |
 |-------|----------|-----------|
-| `sync.requested` | Core API (scheduler or user action) | Ingestion services |
+| `sync.requested` | Core API (high-frequency scheduler or user action) | Ingestion services |
 | `sync.completed` | Core API (after ingestion writes) | Notification service, portal (future) |
 | `connection.status_changed` | Ingestion service | Core API, notification service |
 
@@ -229,7 +226,7 @@ However, we chose REST for the public API at launch for these reasons:
 
 - **Isolation**: a provider outage or SDK bug is contained to one ingestion service. The core API and other providers continue operating.
 - **Testability**: ingestion services can be tested against provider sandboxes independently. The core API is tested against its internal contract.
-- **Incremental build**: we can ship with SimpleFin only, add Akoya/MX/Plaid as separate deployments without touching the core.
+- **Incremental build**: we ship with Akoya first, add Plaid and other providers as separate deployments without touching the core.
 - **Operational simplicity**: at launch, all services can run as processes on a single host. The architecture supports splitting to separate hosts/containers when needed.
 - **Trade-off — HTTP overhead**: internal HTTP adds latency vs. direct DB writes. For the expected transaction volumes (personal finance, not HFT), this is negligible.
 - **Trade-off — eventual consistency**: async event-driven sync means the portal may show slightly stale data between syncs. This is acceptable for the use case and matches user expectations (bank data is already delayed).

@@ -33,7 +33,7 @@ graph TB
     subgraph NF["Northflank Project"]
         subgraph Services["Services"]
             API["Steward API<br/>(Core + MCP + Portal static)<br/>Container"]
-            SF["SimpleFin Ingestion<br/>Container"]
+            AK["Akoya Ingestion<br/>Container"]
         end
 
         subgraph Addons["Managed Add-ons"]
@@ -43,12 +43,12 @@ graph TB
 
     Internet((Internet)) -->|HTTPS| API
     API --> PG
-    SF -->|internal HTTP| API
+    AK -->|internal HTTP| API
 ```
 
 Key characteristics:
 - **Single container for Core API + MCP + Portal**: the MCP server is a route group within the Falco application. The portal SPA is built at deploy time and served by the API. Split into separate services only when scaling demands it.
-- **One ingestion container**: start with SimpleFin only. Additional providers are added as separate Northflank services.
+- **One ingestion container**: start with Akoya only. Plaid is planned as the next provider, deployed as a separate Northflank service.
 - **Managed PostgreSQL add-on**: Northflank provisions and manages the Postgres instance. Connection strings are injected as environment variables. Backups are handled by the platform.
 - **Smallest resource tier**: use the minimum container size (CPU/RAM) and smallest Postgres instance that Northflank offers. Scale up through the dashboard or API when needed.
 
@@ -93,7 +93,7 @@ Northflank supports incremental scaling without rearchitecting:
 | Trigger | Action |
 |---------|--------|
 | API response times degrade | Scale up container resources or add replicas |
-| Adding a second ingestion provider | Deploy as a new Northflank service |
+| Adding Plaid (second provider) | Deploy as a new Northflank service |
 | Database performance bottleneck | Scale up the managed Postgres add-on |
 | Need for async job processing | Add a Redis add-on and worker service |
 
@@ -118,7 +118,7 @@ Cost drivers:
 - **Database**: managed Postgres is the largest fixed cost.
 - **Compute**: F# on .NET is memory-efficient; the API idles at ~50MB RAM.
 - **Bandwidth**: minimal for a financial API (small JSON payloads, no media).
-- **Provider API costs**: Plaid and Akoya have per-connection fees that may dominate hosting costs at scale. SimpleFin is free/donation-based.
+- **Provider API costs**: Akoya and Plaid have per-connection fees that may dominate hosting costs at scale. Frequent re-sync scheduling increases API call volume, so provider rate limits and pricing tiers are a key cost factor.
 
 ## Consequences
 
