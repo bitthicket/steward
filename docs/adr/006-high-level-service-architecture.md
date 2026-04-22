@@ -237,4 +237,4 @@ However, we chose REST for the public API at launch for these reasons:
 ## Related Decisions
 
 - [ADR-005](005-data-feed-abstraction.md): defines the domain-level data feed abstractions that ingestion services implement.
-- [ADR-007](007-deployment-and-hosting.md): covers how these services are deployed and hosted.
+- [ADR-007](007-deployment-and-hosting.md): covers how these services are deployed and hosted (Northflank, managed Postgres, DbUp migrations).
