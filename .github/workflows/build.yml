@@ -3,8 +3,18 @@ name: Build and Test
 on:
   push:
     branches: [master]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - '*.slnx'
+      - '.github/workflows/build.yml'
   pull_request:
     branches: [master]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - '*.slnx'
+      - '.github/workflows/build.yml'
 
 jobs:
   build:
