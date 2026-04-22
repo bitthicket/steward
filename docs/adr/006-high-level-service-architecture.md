@@ -202,6 +202,29 @@ The message bus carries lightweight event envelopes for async coordination:
 
 The initial message bus can be as simple as an in-process channel or SQLite-backed queue. Graduate to Redis Streams or NATS when traffic justifies it.
 
+## Considered Alternatives
+
+### GraphQL (internal API, public API, or both)
+
+GraphQL was evaluated for both the internal ingestion API and the public-facing API.
+
+**Internal API**: REST is the better fit. The ingestion services perform fixed, command-oriented operations (batch upsert transactions, record sync events). The payloads are predictable and narrow — there is no over-fetching problem to solve, and GraphQL's schema/resolver overhead adds complexity without benefit.
+
+**Public API**: GraphQL has genuine appeal here:
+
+- The portal and third-party clients may want different projections of the same data (e.g., transactions with categories vs. transactions with account details). GraphQL handles this naturally.
+- AI agents could construct flexible queries without us predicting every access pattern.
+- Reduces round-trips for the portal (fetch account + recent transactions + budget status in one call).
+
+However, we chose REST for the public API at launch for these reasons:
+
+1. **MCP is the primary interface.** AI agents interact through MCP tools, not the HTTP API directly. MCP already provides the "flexible query" layer — agents call our tools, we decide what to fetch internally. GraphQL at the public boundary is redundant for the flagship use case.
+2. **F# ecosystem maturity.** GraphQL libraries for F# (e.g., FSharp.Data.GraphQL) are less mature than the REST tooling around Falco and ASP.NET Core. More friction to ship the initial product.
+3. **Authorization surface area.** GraphQL's flexibility requires field-level access control rather than endpoint-level. For a financial API handling account balances and transaction data, that's a non-trivial security surface to get right from day one.
+4. **Portal is intentionally minimal.** A handful of REST endpoints covers the portal's needs without a schema/resolver layer.
+
+**Upgrade path**: if third-party clients or the portal outgrow REST (too many bespoke endpoints, excessive round-trips), GraphQL can be layered on top of the same domain logic as another route group in the Falco application — no rearchitecture required.
+
 ## Consequences
 
 - **Isolation**: a provider outage or SDK bug is contained to one ingestion service. The core API and other providers continue operating.
