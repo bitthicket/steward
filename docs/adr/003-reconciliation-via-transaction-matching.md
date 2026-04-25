@@ -17,14 +17,14 @@ Two-level reconciliation:
 When a data feed imports transactions, the sync service attempts to match each incoming transaction against existing manual entries on the same account using:
 
 - Amount (exact match)
-- Date (within a configurable tolerance window, default ±2 days)
+- Date (within a configurable tolerance window, default ±2 days). Compare on `OccurredAt` (the transaction date) since that is what the user supplied for the manual entry. Posting date (`PostedAt`) is not yet known on a manual entry, so it cannot be used at this step.
 - Description similarity (fuzzy, for confidence scoring)
 
-Matched pairs are linked via `Transaction.MatchedTransactionId` (bidirectional). The manual entry is promoted to `Reconciled` status; the feed entry is discarded or merged.
+Matched pairs are linked via `Transaction.MatchedTransactionId` (bidirectional). The manual entry is promoted to `Reconciled` status; the feed entry is discarded or merged. The match operation also copies `PostedAt` from the feed transaction onto the matched record so future statement reconciliation has the institution's posting date.
 
 ### 2. Manual reconciliation (user-initiated)
 
-The user starts a reconciliation session for an account with a statement balance and date. They mark transactions as matched against the statement. The session tracks matched/unmatched counts and completes when the computed balance equals the statement balance.
+The user starts a reconciliation session for an account with a statement balance and date. They mark transactions as matched against the statement. The session tracks matched/unmatched counts and completes when the computed balance equals the statement balance. Statement matching uses `PostedAt` (the institution's posting date) for the date filter, since that is what appears on the statement; transactions still pending (`PostedAt` is `None`) are excluded from the reconcilable set.
 
 `Transaction.Status` progresses: `Pending` → `Cleared` (appeared in feed) → `Reconciled` (confirmed against statement).
 

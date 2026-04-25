@@ -58,7 +58,7 @@ type Account = {
     AccountType: AccountType
     CurrencyCode: string
     InstitutionName: string option
-    /// External identifier from data feed (e.g. SimpleFin account ID)
+    /// External identifier from data feed (e.g. Akoya account ID)
     ExternalId: string option
     CreditCardInfo: CreditCardInfo option
     IsActive: bool
@@ -97,7 +97,11 @@ type Transaction = {
     MatchedTransactionId: Guid option
     /// For transfers between own accounts
     TransferAccountId: Guid option
+    /// Posting date — when the institution settled the transaction. Required for
+    /// statement reconciliation; None until the institution posts.
     PostedAt: DateTimeOffset option
+    /// Transaction date — when the activity happened from the user's perspective
+    /// (e.g. the moment of swipe). This is the date users recall and the UI sorts by.
     OccurredAt: DateTimeOffset
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
@@ -164,8 +168,9 @@ type Budget = {
 
 [<RequireQualifiedAccess>]
 type DataFeedProvider =
-    | SimpleFin
+    | Akoya
     | Plaid
+    | MX
     | Manual
 
 [<RequireQualifiedAccess>]

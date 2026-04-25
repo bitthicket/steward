@@ -41,7 +41,7 @@ docs/
 
 **CreditCardPayment** — Models the payment flow from a funding account to a credit card, generating linked debit/credit transactions.
 
-**DataFeedConnection** — Represents a link to an external data provider (SimpleFin, Plaid). Tracks connection health and sync history.
+**DataFeedConnection** — Represents a link to an external data provider (Akoya, Plaid, MX). Tracks connection health and sync history. SimpleFin was evaluated and rejected — its batch sync model is too high-latency for agent workflows (see [ADR-005](docs/adr/005-data-feed-abstraction.md)).
 
 **Reconciliation** — A session for verifying account records against a bank statement.
 
