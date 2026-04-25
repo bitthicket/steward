@@ -4,6 +4,12 @@ open Falco
 open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
+open BitThicket.Steward.Api
+
+// Run DbUp before the web host starts. A failure here throws and the process
+// exits non-zero so Northflank surfaces a failed deploy rather than booting an
+// API against an unmigrated database.
+Migrations.apply (Migrations.getConnectionString ())
 
 let port =
     match Environment.GetEnvironmentVariable("PORT") with
