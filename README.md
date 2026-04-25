@@ -87,3 +87,29 @@ dotnet build
 dotnet run --project src/BitThicket.Steward.Api
 dotnet test
 ```
+
+## Deployment
+
+The Core API runs on Northflank ([ADR-007](docs/adr/007-deployment-and-hosting.md)).
+
+- **Live URL**: https://http--steward-api--cm284mpx4hvd.code.run
+- **Health check**: https://http--steward-api--cm284mpx4hvd.code.run/health
+- **Northflank project**: `steward-finance` / service `steward-api` (region `us-central`, deployment plan `nf-compute-10`)
+
+### Redeploying
+
+Northflank watches the `master` branch and rebuilds on every push:
+
+```bash
+git push origin master
+```
+
+That's it — Northflank pulls the new commit, runs `docker build` against the repo-root `Dockerfile`, and rolls the container.
+
+### Local container
+
+```bash
+docker build -t steward-api:local .
+docker run --rm -p 8080:8080 -e PORT=8080 steward-api:local
+curl http://localhost:8080/health
+```
