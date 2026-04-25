@@ -19,7 +19,7 @@ Most providers expose both; some surface only one. The domain has to record both
 
 ## Decision
 
-- Model data feeds as `DataFeedConnection` records, each linked to a `DataFeedProvider` (Akoya, Plaid, MX, Manual). Akoya is the launch provider per ADR-006; SimpleFin is intentionally not in the provider set.
+- Model data feeds as `DataFeedConnection` records, each linked to a `DataFeedProvider` (Akoya, Plaid, MX, Yodlee, Intuit, Manual). Akoya is the launch provider per ADR-006; SimpleFin is intentionally not in the provider set. Yodlee and Intuit are listed because req 11 names them explicitly — including them now forces us to think about credential-flow differences (Intuit's QuickBooks-flavored OAuth differs from Akoya's FDX-style flow) before we ship integrations. The provider type stays a closed DU for now; it will graduate to an open-string `providerKey` plus a registry once a third-party plugin model is needed (called out as a future change in ADR-006's "considered alternatives" rather than relitigated here).
 - Each connection tracks its own `ConnectionStatus` (Active, NeedsReauth, Disabled, Error) independently.
 - Sync operations produce `SyncEvent` records for observability: when a sync ran, what it found, and what changed.
 - The domain model defines the sync contract; provider-specific logic lives in infrastructure adapters behind a common interface.
@@ -27,7 +27,8 @@ Most providers expose both; some surface only one. The domain has to record both
   - `OccurredAt` — the transaction date (when the activity happened from the user's perspective). Required.
   - `PostedAt` — the institution's posting date. Optional, set whenever the provider exposes it; left `None` for transactions that have not yet posted.
   When a provider only returns one date, the adapter records it as `OccurredAt` and leaves `PostedAt` empty until the posting date is observed on a later sync.
-- `UserPreferences.PreferredSyncFrequency` expresses the user's desired update cadence. The scheduler respects this but is bounded by provider capabilities. The supported aggregators (Akoya, Plaid, MX) are all near-real-time; we deliberately exclude providers whose sync floor is daily or coarser.
+- `UserPreferences.PreferredSyncFrequency` expresses the user's desired update cadence. The scheduler respects this but is bounded by provider capabilities. The supported aggregators (Akoya, Plaid, MX, Yodlee, Intuit) are all near-real-time; we deliberately exclude providers whose sync floor is daily or coarser.
+- The `PreferredSyncFrequency` value is bounded: at least `15 minutes` (no provider supports faster than this in practice, and finer cadences would just waste API quota), at most `24 hours`. Inputs outside that range are clamped at the service boundary; the domain documents the bound on the field so consumers do not invent their own. The latency floor is enforced operationally rather than by a domain invariant — it is the combination of (a) the provider set above and (b) this frequency bound — but the floor is named here so future provider additions can be evaluated against it.
 
 ## Consequences
 

@@ -16,8 +16,8 @@ Use **single-entry bookkeeping** with explicit transfer links:
 
 - Each transaction belongs to exactly one account.
 - Amounts are signed: negative = money out, positive = money in.
-- Transfers between own accounts are represented as two linked transactions (one per account) connected via `TransferAccountId`.
-- Credit card payments are a specialized transfer type with additional metadata (`CreditCardPayment` record).
+- Transfers between own accounts are represented as two linked transactions (one per account) connected via `TransferAccountId`. The two legs MUST satisfy: same currency, opposing signs, equal absolute amount, `OccurredAt` within a small tolerance window (default ±1 day), and each leg's `TransferAccountId` references the other leg's account. Cross-currency transfers are modeled as two transfers in their respective currencies (see ADR-002). The transfer-integrity invariants are enforced in the service layer; the type system carries the link but not the equality.
+- Credit card payments are a specialized transfer type with additional metadata (`CreditCardPayment` record). Once `PaidAt` is set, both `DebitTransactionId` and `CreditTransactionId` MUST be present (an unfulfilled payment cannot be marked paid). The optional shape on the type accommodates the in-flight scheduled-but-not-yet-executed state.
 - Each transaction carries two timestamps: `OccurredAt` (transaction date — when the activity happened from the user's perspective, e.g. the moment of swipe or transfer) and `PostedAt` (posting date — when the institution settled it onto the account ledger). `OccurredAt` is required; `PostedAt` is optional and is filled in once the institution posts the transaction. The user-facing UI sorts and groups by `OccurredAt`; reconciliation and statement matching use `PostedAt` because that is the date institutions report against. See ADR-005 for the feed-side contract that ensures both dates are populated whenever a provider exposes them.
 
 ## Consequences
