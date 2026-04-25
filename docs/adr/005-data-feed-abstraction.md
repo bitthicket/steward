@@ -30,10 +30,30 @@ Most providers expose both; some surface only one. The domain has to record both
 - `UserPreferences.PreferredSyncFrequency` expresses the user's desired update cadence. The scheduler respects this but is bounded by provider capabilities. The supported aggregators (Akoya, Plaid, MX, Yodlee, Intuit) are all near-real-time; we deliberately exclude providers whose sync floor is daily or coarser.
 - The `PreferredSyncFrequency` value is bounded: at least `15 minutes` (no provider supports faster than this in practice, and finer cadences would just waste API quota), at most `24 hours`. Inputs outside that range are clamped at the service boundary; the domain documents the bound on the field so consumers do not invent their own. The latency floor is enforced operationally rather than by a domain invariant — it is the combination of (a) the provider set above and (b) this frequency bound — but the floor is named here so future provider additions can be evaluated against it.
 
+### Auth flow modeling
+
+Aggregators differ substantively in how they connect: FDX-style OAuth with bank consent (Akoya), QuickBooks-flavored OAuth with a `realmId` (Intuit), frontend link widgets that return tokens to exchange (Plaid Link, MX Connect, Yodlee FastLink). The closed `DataFeedProvider` DU answers "which provider", not "how does its auth flow work". Auth flow differences are decomposed into three layers:
+
+1. **Domain — non-secret per-connection state.** `ProviderMetadata` is a parallel DU with one case per provider, carrying the stable identifiers each aggregator uses to address a connection (Plaid `itemId`, MX `memberGuid`, Intuit `realmId` and so on). Every `DataFeedConnection` holds a `ProviderMetadata` value; the provider tag is derived via `DataFeedConnection.providerOf`. This puts the differences that the *rest of the domain* needs to know about — which identifiers we persist, which institutions we addressed — in the type system.
+
+2. **Domain — coarse flow classification.** `AuthFlowKind` (`OAuthRedirect | LinkWidget | None`) is a derived hint for the UI/service layer so callers can render the right kind of UX without dispatching on every provider variant. It is computed from `ProviderMetadata` via `DataFeedConnection.authFlowKindOf`. It is intentionally coarse — anything finer (redirect URLs, widget config, scope strings) is a service-layer concern.
+
+3. **Service / vault — the actual flow.** Per-provider adapters own:
+   - the OAuth redirect URL construction or widget initialization,
+   - the public-token-to-access-token exchange,
+   - refresh token rotation,
+   - webhook signature validation,
+   - and any provider-specific re-auth handoff.
+   Secrets (access tokens, refresh tokens, ephemeral codes) live in the vault behind `CredentialRef`. The shape of those secrets varies per provider; the vault is responsible for that shape, not the domain.
+
+**Re-authorization** is modeled by `ConnectionStatus.NeedsReauth` plus the remediation primitives in [ADR-011](011-feed-health-and-remediation.md). When a provider's tokens expire and cannot be silently refreshed, the connection lands in `NeedsReauth`; an agent or user remediation attempt drives the user-facing re-handoff (which is itself a service-layer flow per provider).
+
+The closed-vs-open DU choice for `DataFeedProvider` is independent of all of this. Even if we move to an open-string `providerKey` later, we will still need a `ProviderMetadata` analogue (likely a registry-keyed dictionary of typed metadata blobs). The non-secret per-provider differences do not disappear when the provider list opens up; they get wider.
+
 ## Consequences
 
 - **Provider-agnostic**: Adding a new data source means implementing an adapter — no domain model changes.
 - **Sync visibility**: `SyncEvent` gives users and operators insight into data freshness without inspecting provider logs.
-- **Credential safety**: `CredentialRef` is an opaque reference (vault key, encrypted blob ID) — actual secrets never live in the domain layer.
+- **Credential safety**: `CredentialRef` is an opaque reference (vault key, encrypted blob ID) — actual secrets never live in the domain layer. Per-provider non-secret state (Plaid `itemId`, Intuit `realmId`, etc.) is modeled separately via `ProviderMetadata` so the domain can address connections, persist provider-specific identifiers, and surface re-auth state without ever holding a token.
 - **Latency floor**: By excluding SimpleFin-class batch providers from the provider set, the system can guarantee a sync floor compatible with agent workflows. Adding a new provider that does not meet this latency floor is a domain-shaping decision, not just a config change.
 - **Dual dates as a hard contract**: Both `OccurredAt` and `PostedAt` are first-class on the transaction. This costs two columns and a small amount of adapter complexity, and in return the UI can sort by transaction date (what users recall) while reconciliation and statement matching use posting date (what institutions report).

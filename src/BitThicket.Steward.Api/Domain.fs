@@ -288,6 +288,10 @@ type Budget = {
 // Data Feeds & Sync
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Coarse provider identity. Used for filtering, UI labels, and config lookups
+/// when no connection record is in hand. The rich per-connection state lives
+/// in ProviderMetadata; the tag is derivable from a metadata value via
+/// DataFeedConnection.providerOf.
 [<RequireQualifiedAccess>]
 type DataFeedProvider =
     | Akoya
@@ -295,6 +299,43 @@ type DataFeedProvider =
     | MX
     | Yodlee
     | Intuit
+    | Manual
+
+/// Coarse classification of a provider's connect/handoff flow. Hint for the
+/// UI/service layer; not a domain invariant. The detailed flow (redirect URLs,
+/// widget config, refresh semantics) lives in the per-provider adapter.
+[<RequireQualifiedAccess>]
+type AuthFlowKind =
+    /// Server-side OAuth 2.0 redirect handoff (Akoya FDX, Intuit OAuth).
+    | OAuthRedirect
+    /// Frontend-mediated link widget that returns a token to exchange (Plaid Link, MX Connect, Yodlee FastLink).
+    | LinkWidget
+    /// No external auth — local-only manual connections.
+    | None
+
+/// Per-connection non-secret state, parameterised by provider. Captures the
+/// stable identifiers each aggregator uses to address a connection. Secrets
+/// (access tokens, refresh tokens) never live here — they sit behind
+/// DataFeedConnection.CredentialRef in the vault. See ADR-005 for the auth-flow
+/// modeling rationale.
+[<RequireQualifiedAccess>]
+type ProviderMetadata =
+    /// Akoya FDX: customerId is the Akoya-side user identifier; institutionId
+    /// names the connected bank. OAuth redirect handoff.
+    | Akoya of customerId: string * institutionId: string
+    /// Plaid: itemId is per-institution connection; institutionId is Plaid's bank id.
+    /// Link Widget handoff.
+    | Plaid of itemId: string * institutionId: string
+    /// MX Atrium: memberGuid identifies the connection; institutionCode names the institution.
+    /// Connect Widget handoff.
+    | MX of memberGuid: string * institutionCode: string
+    /// Yodlee: providerAccountId identifies the connection; loginFormId is the
+    /// optional reference to the form used for re-auth prompts. FastLink widget handoff.
+    | Yodlee of providerAccountId: string * loginFormId: string option
+    /// Intuit/QuickBooks: realmId is the QuickBooks company id (required for every
+    /// API call). companyName is descriptive metadata for the UI. OAuth redirect handoff.
+    | Intuit of realmId: string * companyName: string option
+    /// Manual: no external connection metadata.
     | Manual
 
 [<RequireQualifiedAccess>]
@@ -307,14 +348,37 @@ type ConnectionStatus =
 type DataFeedConnection = {
     Id: Guid
     UserId: Guid
-    Provider: DataFeedProvider
-    /// Opaque token/credentials reference (never stored in plaintext in domain)
+    /// Provider identity AND non-secret per-connection state, in one DU value.
+    /// Use DataFeedConnection.providerOf to extract the coarse provider tag.
+    Metadata: ProviderMetadata
+    /// Opaque token/credentials reference (never stored in plaintext in domain).
+    /// The vault behind this ref is responsible for secret rotation, refresh,
+    /// and per-provider token shape.
     CredentialRef: string
     Status: ConnectionStatus
     LinkedAccountIds: Guid list
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }
+
+module DataFeedConnection =
+    let providerOf (metadata: ProviderMetadata) : DataFeedProvider =
+        match metadata with
+        | ProviderMetadata.Akoya _ -> DataFeedProvider.Akoya
+        | ProviderMetadata.Plaid _ -> DataFeedProvider.Plaid
+        | ProviderMetadata.MX _ -> DataFeedProvider.MX
+        | ProviderMetadata.Yodlee _ -> DataFeedProvider.Yodlee
+        | ProviderMetadata.Intuit _ -> DataFeedProvider.Intuit
+        | ProviderMetadata.Manual -> DataFeedProvider.Manual
+
+    let authFlowKindOf (metadata: ProviderMetadata) : AuthFlowKind =
+        match metadata with
+        | ProviderMetadata.Akoya _ -> AuthFlowKind.OAuthRedirect
+        | ProviderMetadata.Intuit _ -> AuthFlowKind.OAuthRedirect
+        | ProviderMetadata.Plaid _ -> AuthFlowKind.LinkWidget
+        | ProviderMetadata.MX _ -> AuthFlowKind.LinkWidget
+        | ProviderMetadata.Yodlee _ -> AuthFlowKind.LinkWidget
+        | ProviderMetadata.Manual -> AuthFlowKind.None
 
 [<RequireQualifiedAccess>]
 type SyncStatus =
