@@ -12,6 +12,7 @@
     <Compile Include="AccountRepository.fs" />
     <Compile Include="CategoryRepository.fs" />
     <Compile Include="TransactionRepository.fs" />
+    <Compile Include="BudgetRepository.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="PricingWorker.fs" />
@@ -26,6 +27,8 @@
     <PackageReference Include="dbup-postgresql" Version="7.0.1" />
     <PackageReference Include="Falco" Version="5.*" />
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.*" />
+    <PackageReference Include="FSharp.SystemTextJson" Version="1.*" />
     <PackageReference Include="Npgsql" Version="10.0.1" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
   </ItemGroup>
 </Project>
