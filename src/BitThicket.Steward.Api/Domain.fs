@@ -152,6 +152,7 @@ type Transaction = {
     AccountId: Guid
     Amount: Money
     Description: string
+    Merchant: string option
     Memo: string option
     /// Roll-up category when the transaction has no splits. When TransactionSplit
     /// records exist for this transaction, the splits are authoritative for
@@ -159,6 +160,7 @@ type Transaction = {
     CategoryId: Guid option
     Status: TransactionStatus
     Source: TransactionSource
+    ExternalId: string option
     /// Links to the counterpart transaction if matched during reconciliation
     MatchedTransactionId: Guid option
     /// Confidence score in [0.0, 1.0] for the auto-match that produced
