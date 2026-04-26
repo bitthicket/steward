@@ -3,6 +3,17 @@ namespace BitThicket.Steward.Api.Domain
 open System
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Tenant
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Tenant = {
+    Id: Guid
+    DisplayName: string
+    CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // User
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -11,10 +22,22 @@ open System
 /// auth, profile, and preferences metadata.
 type User = {
     Id: Guid
-    DisplayName: string
-    Email: string option
+    Email: string
+    PasswordHash: string
+    DisplayName: string option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserTenantMembership
+// ─────────────────────────────────────────────────────────────────────────────
+
+type UserTenantMembership = {
+    UserId: Guid
+    TenantId: Guid
+    Role: string
+    CreatedAt: DateTimeOffset
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,6 +104,7 @@ type CreditCardInfo = {
 
 type Account = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     Name: string
     AccountType: AccountType
@@ -124,6 +148,7 @@ type TransactionSource =
 /// we link them via MatchedTransactionId.
 type Transaction = {
     Id: Guid
+    TenantId: Guid
     AccountId: Guid
     Amount: Money
     Description: string
@@ -169,6 +194,7 @@ type SplitSource =
 /// to the parent transaction's Amount. See ADR-008.
 type TransactionSplit = {
     Id: Guid
+    TenantId: Guid
     TransactionId: Guid
     Amount: Money
     CategoryId: Guid option
@@ -191,6 +217,7 @@ type AttachmentKind =
 /// See ADR-008.
 type Attachment = {
     Id: Guid
+    TenantId: Guid
     TransactionId: Guid
     SplitId: Guid option
     Kind: AttachmentKind
@@ -215,6 +242,7 @@ type EnrichmentStatus =
 /// See ADR-008.
 type TransactionEnrichment = {
     Id: Guid
+    TenantId: Guid
     TransactionId: Guid
     /// Open-string identifier for the external source (e.g. "amazon", "square").
     SourceKey: string
@@ -235,6 +263,7 @@ type TransactionEnrichment = {
 
 type Category = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     Name: string
     ParentCategoryId: Guid option
@@ -262,6 +291,7 @@ type BudgetPeriod =
 
 type BudgetCategory = {
     Id: Guid
+    TenantId: Guid
     BudgetId: Guid
     CategoryId: Guid
     AllocatedAmount: Money
@@ -273,6 +303,7 @@ type BudgetCategory = {
 
 type Budget = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     Name: string
     Style: BudgetingStyle
@@ -347,6 +378,7 @@ type ConnectionStatus =
 
 type DataFeedConnection = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     /// Provider identity AND non-secret per-connection state, in one DU value.
     /// Use DataFeedConnection.providerOf to extract the coarse provider tag.
@@ -388,6 +420,7 @@ type SyncStatus =
 
 type SyncEvent = {
     Id: Guid
+    TenantId: Guid
     ConnectionId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
@@ -425,6 +458,7 @@ type RemediationOutcome =
 /// or degraded feed connection. See ADR-011.
 type RemediationAttempt = {
     Id: Guid
+    TenantId: Guid
     ConnectionId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
@@ -448,6 +482,7 @@ type ReconciliationStatus =
 
 type Reconciliation = {
     Id: Guid
+    TenantId: Guid
     AccountId: Guid
     StatementBalance: Money
     StatementDate: DateOnly
@@ -478,6 +513,7 @@ type PaymentType =
 /// is representable.
 type CreditCardPayment = {
     Id: Guid
+    TenantId: Guid
     CreditCardAccountId: Guid
     FundingAccountId: Guid
     Amount: Money
@@ -495,6 +531,7 @@ type CreditCardPayment = {
 
 type UserPreferences = {
     UserId: Guid
+    TenantId: Guid
     DefaultCurrencyCode: string
     DefaultBudgetingStyle: BudgetingStyle
     /// User's desired sync cadence. Bounded by the service layer to
