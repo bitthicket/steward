@@ -37,8 +37,8 @@ type TokenBucket(capacity: int, refillPerSecond: float) =
                     let now = DateTime.UtcNow
                     let elapsed = (now - lastRefill).TotalSeconds
                     tokens <- Math.Min(float capacity, tokens + elapsed * refillPerSecond)
-                    lastRefill <- now
                     if tokens >= 1.0 then
+                        lastRefill <- now
                         tokens <- tokens - 1.0
                         acquired <- true
                 finally
@@ -121,7 +121,7 @@ type CoinGeckoPriceProvider(http: HttpClient, db: NpgsqlDataSource, logger: ILog
             return doc.RootElement.GetProperty(coinId).GetProperty(quoteLower).GetDecimal()
         }
 
-    let fetchHistoricalFromApi (coinId: string) (quoteCurr: string) (asOf: DateTimeOffset) : Task<decimal option> =
+    let fetchHistoricalFromApi (coinId: string) (quoteCurr: string) (asOf: DateTime) : Task<decimal option> =
         task {
             do! bucket.WaitAsync(CancellationToken.None)
             let dateStr = asOf.ToString("dd-MM-yyyy")
@@ -172,7 +172,7 @@ type CoinGeckoPriceProvider(http: HttpClient, db: NpgsqlDataSource, logger: ILog
         member _.GetHistoricalAsync(baseCurr, quoteCurr, asOf) =
             task {
                 // Normalize to UTC day start — historical prices are immutable per day
-                let dayStart = DateTime(asOf.Year, asOf.Month, asOf.Day, 0, 0, 0, DateTimeKind.Utc)
+                let dayStart = asOf.UtcDateTime.Date
 
                 match! tryGetCached baseCurr quoteCurr dayStart false with
                 | Some cached ->
@@ -181,9 +181,9 @@ type CoinGeckoPriceProvider(http: HttpClient, db: NpgsqlDataSource, logger: ILog
                 | None ->
                     logger.LogDebug("Historical cache miss {Base}/{Quote} {Date} — fetching from CoinGecko", baseCurr, quoteCurr, dayStart.ToShortDateString())
                     match Map.tryFind baseCurr CoinGeckoIds.map with
-                    | None -> return None
+                    | None -> return failwith $"No CoinGecko mapping for currency: {baseCurr}"
                     | Some coinId ->
-                        match! fetchHistoricalFromApi coinId quoteCurr asOf with
+                        match! fetchHistoricalFromApi coinId quoteCurr dayStart with
                         | None -> return None
                         | Some value ->
                             let price = {
