@@ -32,6 +32,8 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
 
 let dataSource = NpgsqlDataSource.Create(connectionString)
 builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
+TenantContextServices.register builder.Services |> ignore
+builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
 let sharedHttpClient = new System.Net.Http.HttpClient()
 builder.Services.AddSingleton<IPriceProvider>(fun sp ->
     let db = sp.GetRequiredService<NpgsqlDataSource>()
@@ -83,6 +85,8 @@ let pricesHandler : HttpHandler = fun ctx ->
     }
 
 // ── Application pipeline ──────────────────────────────────────────────────────
+
+wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
 
 wapp.UseRouting()
     .UseFalco([
