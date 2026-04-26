@@ -15,6 +15,7 @@ type ITransactionRepository =
     abstract CreateAsync : transaction:Transaction -> Task<Guid>
     abstract UpdateAsync : transaction:Transaction -> Task<unit>
     abstract DeleteAsync : id:Guid -> Task<unit>
+    abstract DeleteByExternalIdsAsync : externalIds:string list -> Task<int>
     abstract ListMatchCandidatesAsync : accountId:Guid -> Task<Transaction list>
     abstract ListNeedsReviewAsync : unit -> Task<Transaction list>
 
@@ -295,6 +296,19 @@ module TransactionRepository =
             return ()
         }
 
+    let deleteByExternalIdsAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (externalIds: string list) =
+        task {
+            if externalIds.IsEmpty then return 0
+            else
+                use! conn = factory.OpenForTenantAsync(tenantContext)
+                use cmd = conn.CreateCommand()
+                cmd.CommandText <- "DELETE FROM transactions WHERE external_id = ANY($1)"
+                let arr = Array.ofList externalIds
+                cmd.Parameters.AddWithValue("$1", arr) |> ignore
+                let! rows = cmd.ExecuteNonQueryAsync()
+                return rows
+        }
+
     let listMatchCandidatesAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (accountId: Guid) =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
@@ -354,6 +368,7 @@ module TransactionRepository =
             member _.CreateAsync(txn) = createAsync factory txn
             member _.UpdateAsync(txn) = updateAsync factory txn
             member _.DeleteAsync(id) = deleteAsync factory (requireCtx()) id
+            member _.DeleteByExternalIdsAsync(externalIds) = deleteByExternalIdsAsync factory (requireCtx()) externalIds
             member _.ListMatchCandidatesAsync(accountId) = listMatchCandidatesAsync factory (requireCtx()) accountId
             member _.ListNeedsReviewAsync() = listNeedsReviewAsync factory (requireCtx())
         }
