@@ -4,12 +4,17 @@ open Falco
 open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
+open Npgsql
 open BitThicket.Steward.Api
+open BitThicket.Steward.Pricing
 
 // Run DbUp before the web host starts. A failure here throws and the process
 // exits non-zero so Northflank surfaces a failed deploy rather than booting an
 // API against an unmigrated database.
-Migrations.apply (Migrations.getConnectionString ())
+let connectionString = Migrations.getConnectionString ()
+Migrations.apply connectionString
 
 let port =
     match Environment.GetEnvironmentVariable("PORT") with
@@ -23,11 +28,66 @@ let version =
 let builder = WebApplication.CreateBuilder()
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
 
+// ── Services ──────────────────────────────────────────────────────────────────
+
+let dataSource = NpgsqlDataSource.Create(connectionString)
+builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
+let sharedHttpClient = new System.Net.Http.HttpClient()
+builder.Services.AddSingleton<IPriceProvider>(fun sp ->
+    let db = sp.GetRequiredService<NpgsqlDataSource>()
+    let log = sp.GetRequiredService<ILogger<CoinGeckoPriceProvider>>()
+    CoinGeckoPriceProvider(sharedHttpClient, db, log) :> IPriceProvider) |> ignore
+builder.Services.AddHostedService<PricingWorker>() |> ignore
+
 let wapp = builder.Build()
+
+// ── Route handlers ─────────────────────────────────────────────────────────────
+
+// GET /api/prices?base=BTC&quote=USD[&asOf=<ISO8601>]
+// Returns spot price when asOf is omitted; historical price for a specific date otherwise.
+let pricesHandler : HttpHandler = fun ctx ->
+    task {
+        let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+        let q = ctx.Request.Query
+
+        let baseCurr =
+            match q.TryGetValue("base") with
+            | true, v when v.Count > 0 -> v.ToString().ToUpperInvariant()
+            | _ -> "BTC"
+
+        let quoteCurr =
+            match q.TryGetValue("quote") with
+            | true, v when v.Count > 0 -> v.ToString().ToUpperInvariant()
+            | _ -> "USD"
+
+        let asOfOpt =
+            match q.TryGetValue("asOf") with
+            | true, v when v.Count > 0 && not (String.IsNullOrWhiteSpace(v.ToString())) ->
+                match DateTimeOffset.TryParse(v.ToString()) with
+                | true, dt -> Some dt
+                | _ -> None
+            | _ -> None
+
+        match asOfOpt with
+        | Some asOf ->
+            let! result = pricing.GetHistoricalAsync(baseCurr, quoteCurr, asOf)
+            match result with
+            | Some price -> do! Response.ofJson price ctx
+            | None ->
+                ctx.Response.StatusCode <- 404
+                let dateStr = asOf.ToString("yyyy-MM-dd")
+                do! Response.ofJson {| error = $"No price found for {baseCurr}/{quoteCurr} on {dateStr}" |} ctx
+        | None ->
+            let! price = pricing.GetSpotAsync(baseCurr, quoteCurr)
+            do! Response.ofJson price ctx
+    }
+
+// ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseRouting()
     .UseFalco([
         get "/" (Response.ofPlainText "Hello World!")
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
+        get "/api/prices" pricesHandler
     ])
     .Run(Response.ofPlainText "Not found")

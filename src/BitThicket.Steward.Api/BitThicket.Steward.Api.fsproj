@@ -7,6 +7,8 @@
   <ItemGroup>
     <Compile Include="Domain.fs" />
     <Compile Include="Migrations.fs" />
+    <Compile Include="Pricing.fs" />
+    <Compile Include="PricingWorker.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -17,5 +19,6 @@
   <ItemGroup>
     <PackageReference Include="dbup-postgresql" Version="7.0.1" />
     <PackageReference Include="Falco" Version="5.*" />
+    <PackageReference Include="Npgsql" Version="10.0.1" />
   </ItemGroup>
 </Project>
