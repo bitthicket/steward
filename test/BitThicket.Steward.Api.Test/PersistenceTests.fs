@@ -50,10 +50,6 @@ let private canConnect () : bool =
 type PersistenceTests() =
 
     [<Fact>]
-    member _.``Docker is unavailable in this environment``() =
-        test <@ not (canConnect ()) @>
-
-    [<Fact>]
     member _.``OpenForTenantAsync sets steward.tenant_id and steward.user_id``() =
         task {
             if not (canConnect ()) then return () else
