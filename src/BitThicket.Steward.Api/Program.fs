@@ -1,10 +1,14 @@
 open System
+open System.IO
 open System.Reflection
+open System.Threading.Tasks
 open Falco
 open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
+open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.FileProviders
 open Microsoft.Extensions.Logging
 open Npgsql
 open BitThicket.Steward.Api
@@ -111,6 +115,17 @@ let pricesHandler : HttpHandler = fun ctx ->
             do! Response.ofJson price ctx
     }
 
+// ── Static files (portal SPA) ────────────────────────────────────────────────
+
+let portalPath = Path.Combine(wapp.Environment.WebRootPath, "portal")
+if Directory.Exists(portalPath) then
+    wapp.UseStaticFiles(
+        new StaticFileOptions(
+            RequestPath = PathString("/portal"),
+            FileProvider = new PhysicalFileProvider(portalPath)
+        )
+    ) |> ignore
+
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
@@ -121,9 +136,23 @@ wapp.UseRouting()
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
         post "/auth/register" Auth.registerHandler
         post "/auth/login" Auth.loginHandler
+        post "/api/auth/cookie-set" Auth.cookieSetHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
+        // SPA fallthrough for portal routes
+        get "/portal/{*path}" (fun ctx ->
+            let indexPath = Path.Combine(portalPath, "index.html")
+            if File.Exists(indexPath) then
+                task {
+                    ctx.Response.ContentType <- "text/html"
+                    let! bytes = File.ReadAllBytesAsync(indexPath)
+                    do! ctx.Response.Body.WriteAsync(bytes, 0, bytes.Length)
+                }
+            else
+                ctx.Response.StatusCode <- 404
+                Response.ofPlainText "Portal not built" ctx
+        )
     ])
     .Run(Response.ofPlainText "Not found")
