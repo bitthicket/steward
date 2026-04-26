@@ -61,10 +61,6 @@ let private seedTenantAndMembership (conn: NpgsqlConnection) (tenantId: Guid) (u
 type RlsIsolationTests() =
 
     [<Fact>]
-    member _.``Docker is unavailable in this environment``() =
-        test <@ not (canConnect ()) @>
-
-    [<Fact>]
     member _.``With no tenant_id set tenant-scoped tables return zero rows``() =
         task {
             if not (canConnect ()) then return () else
