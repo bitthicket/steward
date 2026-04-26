@@ -9,10 +9,14 @@
 
   <ItemGroup>
     <Compile Include="Tests.fs" />
+    <Compile Include="PersistenceTests.fs" />
+    <Compile Include="AuthTests.fs" />
+    <Compile Include="RlsIsolationTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.11.0" />
     <PackageReference Include="xunit.v3" Version="2.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.*" />
     <PackageReference Include="FsUnit.xUnit" Version="7.*" />
