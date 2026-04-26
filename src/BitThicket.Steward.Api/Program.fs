@@ -54,6 +54,16 @@ let jwtAudience =
     | null | "" -> "steward-api"
     | v -> v
 
+let akoyaIngestionUrl =
+    match Environment.GetEnvironmentVariable("STEWARD_AKOYA_INGESTION_URL") with
+    | null | "" -> None
+    | v -> Some v
+
+let serviceToken =
+    match Environment.GetEnvironmentVariable("STEWARD_SERVICE_TOKEN") with
+    | null | "" -> None
+    | v -> Some v
+
 let version =
     let v = Assembly.GetExecutingAssembly().GetName().Version
     if isNull v then "0.0.0" else v.ToString()
@@ -433,15 +443,52 @@ let internalConnectionStatusHandler : HttpHandler = fun ctx ->
     }
 
 // POST /internal/sync-trigger
+// Routes to the appropriate ingestion service based on the connection's provider.
 let syncTriggerHandler : HttpHandler = fun ctx ->
     task {
-        let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
         let! doc = readJsonBody ctx
         let root = doc.RootElement
         let tenantId = requireGuid root "tenantId"
         let connectionId = requireGuid root "connectionId"
-        let! result = plaid.SyncConnectionAsync tenantId connectionId
-        do! Response.ofJson result ctx
+
+        let accessor = makeManualAccessor tenantId
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let! connOpt = connRepo.GetAsync(connectionId)
+
+        match connOpt with
+        | None ->
+            ctx.Response.StatusCode <- 404
+            do! Response.ofJson {| error = "Connection not found" |} ctx
+        | Some conn ->
+            match DataFeedConnection.providerOf conn.Metadata with
+            | DataFeedProvider.Plaid ->
+                let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
+                let! result = plaid.SyncConnectionAsync tenantId connectionId
+                do! Response.ofJson result ctx
+            | DataFeedProvider.Akoya ->
+                match akoyaIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        ctx.Response.StatusCode <- (int)resp.StatusCode
+                        do! Response.ofJson {| error = "Akoya ingestion failed"; detail = body |} ctx
+                    else
+                        do! Response.ofJson {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |} ctx
+                | _ ->
+                    ctx.Response.StatusCode <- 503
+                    do! Response.ofJson {| error = "Akoya ingestion URL or service token not configured" |} ctx
+            | _ ->
+                ctx.Response.StatusCode <- 501
+                do! Response.ofJson {| error = "Provider not yet supported for sync trigger" |} ctx
     }
 
 // POST /webhooks/plaid
