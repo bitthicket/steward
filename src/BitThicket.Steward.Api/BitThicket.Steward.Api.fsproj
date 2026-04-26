@@ -9,6 +9,7 @@
     <Compile Include="Migrations.fs" />
     <Compile Include="TenantContext.fs" />
     <Compile Include="Persistence.fs" />
+    <Compile Include="AccountRepository.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="PricingWorker.fs" />

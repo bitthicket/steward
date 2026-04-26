@@ -12,6 +12,7 @@
     <Compile Include="PersistenceTests.fs" />
     <Compile Include="AuthTests.fs" />
     <Compile Include="RlsIsolationTests.fs" />
+    <Compile Include="AccountRepositoryTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
