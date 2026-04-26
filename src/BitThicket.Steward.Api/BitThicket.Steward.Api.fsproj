@@ -9,6 +9,7 @@
     <Compile Include="Migrations.fs" />
     <Compile Include="TenantContext.fs" />
     <Compile Include="Persistence.fs" />
+    <Compile Include="Auth.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="PricingWorker.fs" />
     <Compile Include="Program.fs" />
@@ -21,6 +22,7 @@
   <ItemGroup>
     <PackageReference Include="dbup-postgresql" Version="7.0.1" />
     <PackageReference Include="Falco" Version="5.*" />
+    <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.*" />
     <PackageReference Include="Npgsql" Version="10.0.1" />
   </ItemGroup>
 </Project>

@@ -8,14 +8,21 @@ open DbUp.Helpers
 
 module Migrations =
 
-    /// Resolve the DB connection string. Production uses
-    /// STEWARD_DB_CONNECTIONSTRING; absence is fatal — DbUp must run on
-    /// startup and a missing connection string means misconfiguration.
+    /// Resolve the runtime DB connection string. Production uses
+    /// STEWARD_DB_CONNECTIONSTRING; absence is fatal.
     let getConnectionString () : string =
         match Environment.GetEnvironmentVariable("STEWARD_DB_CONNECTIONSTRING") with
         | null | "" ->
             raise (InvalidOperationException(
                 "STEWARD_DB_CONNECTIONSTRING is not set. The Steward API requires a Postgres connection string at startup."))
+        | v -> v
+
+    /// Resolve the migration DB connection string. When STEWARD_DB_MIGRATION_CONNECTIONSTRING
+    /// is set it is used (admin role, may bypass RLS); otherwise falls back to
+    /// the runtime connection string (useful for local dev and tests).
+    let getMigrationConnectionString () : string =
+        match Environment.GetEnvironmentVariable("STEWARD_DB_MIGRATION_CONNECTIONSTRING") with
+        | null | "" -> getConnectionString ()
         | v -> v
 
     /// Build the DbUp upgrader. Migrations are embedded resources from this

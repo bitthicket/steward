@@ -3,6 +3,8 @@ namespace BitThicket.Steward.Api
 open System
 open System.Data.Common
 open System.Threading.Tasks
+open Microsoft.AspNetCore.Http
+open Microsoft.Extensions.DependencyInjection
 open Npgsql
 open BitThicket.Steward.Api.Domain
 
@@ -40,6 +42,17 @@ type DbConnectionFactory(dataSource: NpgsqlDataSource) =
             }
 
 /// Low-level helpers for mapping DbDataReader columns to F# values.
+/// Opens a tenant-scoped connection by resolving the current TenantContext from
+/// the request scope. Feature handlers should use this instead of manually
+/// constructing and passing TenantContext around.
+module TenantScopedConnection =
+    let openAsync (ctx: Microsoft.AspNetCore.Http.HttpContext) =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        match accessor.Context with
+        | Some tc -> factory.OpenForTenantAsync(tc)
+        | None -> failwith "No tenant context available for the current request"
+
 module Sql =
     let dateTimeOffset (reader: DbDataReader) (ordinal: int) =
         DateTimeOffset(reader.GetDateTime(ordinal), TimeSpan.Zero)
@@ -64,7 +77,10 @@ module RootRepository =
 
     let getTenantById (factory: IDbConnectionFactory) (id: Guid) =
         task {
-            use! conn = factory.OpenAsync()
+            // RLS on tenants filters by steward.tenant_id; set it to the
+            // tenant being queried so the row is visible.
+            let ctx = { TenantId = id; UserId = Guid.Empty }
+            use! conn = factory.OpenForTenantAsync(ctx)
             use cmd = conn.CreateCommand()
             cmd.CommandText <- "SELECT id, display_name, created_at, updated_at FROM tenants WHERE id = $1"
             cmd.Parameters.AddWithValue("$1", id) |> ignore
@@ -83,27 +99,13 @@ module RootRepository =
                     None
         }
 
-    let listTenants (factory: IDbConnectionFactory) =
-        task {
-            use! conn = factory.OpenAsync()
-            use cmd = conn.CreateCommand()
-            cmd.CommandText <- "SELECT id, display_name, created_at, updated_at FROM tenants ORDER BY created_at"
-            let! reader = cmd.ExecuteReaderAsync()
-            use reader = reader
-            let tenants = ResizeArray<Tenant>()
-            while! reader.ReadAsync() do
-                tenants.Add {
-                    Id = reader.GetGuid(0)
-                    DisplayName = reader.GetString(1)
-                    CreatedAt = Sql.dateTimeOffset reader 2
-                    UpdatedAt = Sql.dateTimeOffset reader 3
-                }
-            return tenants |> Seq.toList
-        }
-
     let createTenant (factory: IDbConnectionFactory) (tenant: Tenant) =
         task {
-            use! conn = factory.OpenAsync()
+            // A new tenant must be inserted with its own tenant_id set as
+            // the RLS GUC, otherwise the row would be invisible to the
+            // inserting connection.
+            let ctx = { TenantId = tenant.Id; UserId = Guid.Empty }
+            use! conn = factory.OpenForTenantAsync(ctx)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """INSERT INTO tenants (id, display_name, created_at, updated_at)
@@ -183,14 +185,15 @@ module RootRepository =
             CreatedAt = Sql.dateTimeOffset reader 3
         }
 
+    /// Cross-tenant membership read used by the login flow.
+    /// Bypasses RLS via the SECURITY DEFINER function get_user_memberships
+    /// because the caller has not yet established a tenant context.
     let listMembershipsByUser (factory: IDbConnectionFactory) (userId: Guid) =
         task {
             use! conn = factory.OpenAsync()
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT user_id, tenant_id, role, created_at
-                   FROM user_tenant_memberships
-                   WHERE user_id = $1"""
+                "SELECT user_id, tenant_id, role, created_at FROM get_user_memberships($1)"
             cmd.Parameters.AddWithValue("$1", userId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
@@ -202,7 +205,8 @@ module RootRepository =
 
     let listMembershipsByTenant (factory: IDbConnectionFactory) (tenantId: Guid) =
         task {
-            use! conn = factory.OpenAsync()
+            let ctx = { TenantId = tenantId; UserId = Guid.Empty }
+            use! conn = factory.OpenForTenantAsync(ctx)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """SELECT user_id, tenant_id, role, created_at
@@ -219,7 +223,8 @@ module RootRepository =
 
     let createMembership (factory: IDbConnectionFactory) (membership: UserTenantMembership) =
         task {
-            use! conn = factory.OpenAsync()
+            let ctx = { TenantId = membership.TenantId; UserId = membership.UserId }
+            use! conn = factory.OpenForTenantAsync(ctx)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """INSERT INTO user_tenant_memberships (user_id, tenant_id, role, created_at)
@@ -235,7 +240,8 @@ module RootRepository =
 
     let deleteMembership (factory: IDbConnectionFactory) (userId: Guid) (tenantId: Guid) =
         task {
-            use! conn = factory.OpenAsync()
+            let ctx = { TenantId = tenantId; UserId = userId }
+            use! conn = factory.OpenForTenantAsync(ctx)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 "DELETE FROM user_tenant_memberships WHERE user_id = $1 AND tenant_id = $2"
@@ -243,4 +249,62 @@ module RootRepository =
             cmd.Parameters.AddWithValue("$2", tenantId) |> ignore
             let! rows = cmd.ExecuteNonQueryAsync()
             return rows > 0
+        }
+
+    /// Atomically create a user, a tenant, and an owner membership linking them.
+    /// Returns the created IDs on success, or an error string on duplicate email.
+    let registerUserWithTenant (factory: IDbConnectionFactory) (email: string) (passwordHash: string) (displayName: string option) (tenantDisplayName: string) =
+        task {
+            let now = DateTimeOffset.UtcNow
+            let userId = Guid.NewGuid()
+            let tenantId = Guid.NewGuid()
+            // Open the connection with the new tenant/user context so that
+            // RLS policies on tenants and user_tenant_memberships allow the
+            // inserts. users has no RLS, so the user insert is unaffected.
+            let ctx = { TenantId = tenantId; UserId = userId }
+            use! conn = factory.OpenForTenantAsync(ctx)
+            use tx = conn.BeginTransaction()
+            try
+                use userCmd = conn.CreateCommand()
+                userCmd.Transaction <- tx
+                userCmd.CommandText <-
+                    """INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6)"""
+                userCmd.Parameters.AddWithValue("$1", userId) |> ignore
+                userCmd.Parameters.AddWithValue("$2", email) |> ignore
+                userCmd.Parameters.AddWithValue("$3", passwordHash) |> ignore
+                match displayName with
+                | Some name -> userCmd.Parameters.AddWithValue("$4", name) |> ignore
+                | None -> userCmd.Parameters.AddWithValue("$4", DBNull.Value) |> ignore
+                userCmd.Parameters.AddWithValue("$5", now.UtcDateTime) |> ignore
+                userCmd.Parameters.AddWithValue("$6", now.UtcDateTime) |> ignore
+                do! userCmd.ExecuteNonQueryAsync() :> Task
+
+                use tenantCmd = conn.CreateCommand()
+                tenantCmd.Transaction <- tx
+                tenantCmd.CommandText <-
+                    """INSERT INTO tenants (id, display_name, created_at, updated_at)
+                       VALUES ($1, $2, $3, $4)"""
+                tenantCmd.Parameters.AddWithValue("$1", tenantId) |> ignore
+                tenantCmd.Parameters.AddWithValue("$2", tenantDisplayName) |> ignore
+                tenantCmd.Parameters.AddWithValue("$3", now.UtcDateTime) |> ignore
+                tenantCmd.Parameters.AddWithValue("$4", now.UtcDateTime) |> ignore
+                do! tenantCmd.ExecuteNonQueryAsync() :> Task
+
+                use memCmd = conn.CreateCommand()
+                memCmd.Transaction <- tx
+                memCmd.CommandText <-
+                    """INSERT INTO user_tenant_memberships (user_id, tenant_id, role, created_at)
+                       VALUES ($1, $2, $3, $4)"""
+                memCmd.Parameters.AddWithValue("$1", userId) |> ignore
+                memCmd.Parameters.AddWithValue("$2", tenantId) |> ignore
+                memCmd.Parameters.AddWithValue("$3", "owner") |> ignore
+                memCmd.Parameters.AddWithValue("$4", now.UtcDateTime) |> ignore
+                do! memCmd.ExecuteNonQueryAsync() :> Task
+
+                do! tx.CommitAsync()
+                return Ok {| UserId = userId; TenantId = tenantId |}
+            with
+            | :? PostgresException as ex when ex.SqlState = "23505" ->
+                return Error "Email already registered"
         }

@@ -18,7 +18,7 @@ type ITenantContextAccessor =
     abstract Context : TenantContext option
 
 /// Reads TenantContext from the current HttpContext.Items (populated by
-/// TenantContextMiddleware via the X-Tenant-Id and X-User-Id headers).
+/// TenantContextMiddleware via validated JWT claims).
 type TenantContextAccessor(httpContextAccessor: IHttpContextAccessor) =
     interface ITenantContextAccessor with
         member _.Context =
@@ -28,45 +28,6 @@ type TenantContextAccessor(httpContextAccessor: IHttpContextAccessor) =
                 match ctx.Items.TryGetValue("TenantContext") with
                 | true, (:? TenantContext as tc) -> Some tc
                 | _ -> None
-
-/// ASP.NET Core middleware that extracts the X-Tenant-Id and X-User-Id
-/// request headers and stores a TenantContext value in HttpContext.Items
-/// for the scoped ITenantContextAccessor to consume.
-///
-/// NOTE: Header-based extraction is a stop-gap until JWT auth (STE-18)
-/// is in place. At that point the middleware will derive UserId from
-/// the authenticated claims instead of a raw header.
-type TenantContextMiddleware(next: RequestDelegate) =
-    member _.InvokeAsync(ctx: HttpContext) =
-        task {
-            let tryParseGuid (values: Microsoft.Extensions.Primitives.StringValues) =
-                if values.Count > 0 then
-                    match Guid.TryParse(values.[0]) with
-                    | true, g -> Some g
-                    | _ -> None
-                else
-                    None
-
-            let tenantId =
-                match ctx.Request.Headers.TryGetValue("X-Tenant-Id") with
-                | true, v -> tryParseGuid v
-                | _ -> None
-
-            let userId =
-                match ctx.Request.Headers.TryGetValue("X-User-Id") with
-                | true, v -> tryParseGuid v
-                | _ -> None
-
-            match tenantId, userId with
-            | Some tid, Some uid ->
-                ctx.Items["TenantContext"] <- { TenantId = tid; UserId = uid }
-            | _ ->
-                // Either header missing or malformed — ignored. Auth middleware
-                // (STE-17/18) will reject requests without a valid tenant context.
-                ()
-
-            return! next.Invoke(ctx)
-        }
 
 module TenantContextServices =
     /// Register tenant-context services in the DI container.

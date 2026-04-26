@@ -13,12 +13,38 @@ open BitThicket.Steward.Pricing
 // Run DbUp before the web host starts. A failure here throws and the process
 // exits non-zero so Northflank surfaces a failed deploy rather than booting an
 // API against an unmigrated database.
+// Migration connection string may use an admin role (can bypass RLS);
+// runtime connection string uses tenant_app (cannot bypass RLS).
+let migrationConnectionString = Migrations.getMigrationConnectionString ()
+Migrations.apply migrationConnectionString
+
 let connectionString = Migrations.getConnectionString ()
-Migrations.apply connectionString
 
 let port =
     match Environment.GetEnvironmentVariable("PORT") with
     | null | "" -> "8080"
+    | v -> v
+
+let jwtSecret =
+    match Environment.GetEnvironmentVariable("STEWARD_JWT_SECRET") with
+    | null | "" ->
+        raise (InvalidOperationException(
+            "STEWARD_JWT_SECRET is not set. The Steward API requires a JWT secret at startup."))
+    | v -> v
+
+let jwtSecretPrevious =
+    match Environment.GetEnvironmentVariable("STEWARD_JWT_SECRET_PREVIOUS") with
+    | null | "" -> None
+    | v -> Some v
+
+let jwtIssuer =
+    match Environment.GetEnvironmentVariable("STEWARD_JWT_ISSUER") with
+    | null | "" -> "steward"
+    | v -> v
+
+let jwtAudience =
+    match Environment.GetEnvironmentVariable("STEWARD_JWT_AUDIENCE") with
+    | null | "" -> "steward-api"
     | v -> v
 
 let version =
@@ -33,6 +59,7 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
 let dataSource = NpgsqlDataSource.Create(connectionString)
 builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
 TenantContextServices.register builder.Services |> ignore
+AuthServices.register builder.Services { JwtSecret = jwtSecret; JwtSecretPrevious = jwtSecretPrevious; Issuer = jwtIssuer; Audience = jwtAudience } |> ignore
 builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
 let sharedHttpClient = new System.Net.Http.HttpClient()
 builder.Services.AddSingleton<IPriceProvider>(fun sp ->
@@ -92,6 +119,11 @@ wapp.UseRouting()
     .UseFalco([
         get "/" (Response.ofPlainText "Hello World!")
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
+        post "/auth/register" Auth.registerHandler
+        post "/auth/login" Auth.loginHandler
+        get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
+        // Role-gated canary endpoint for integration tests
+        get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
     ])
     .Run(Response.ofPlainText "Not found")
