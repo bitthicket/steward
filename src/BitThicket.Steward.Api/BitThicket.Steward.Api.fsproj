@@ -12,6 +12,7 @@
     <Compile Include="AccountRepository.fs" />
     <Compile Include="CategoryRepository.fs" />
     <Compile Include="TransactionRepository.fs" />
+    <Compile Include="TransactionMatcher.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="PricingWorker.fs" />
