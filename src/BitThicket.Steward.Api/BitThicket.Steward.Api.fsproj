@@ -14,9 +14,11 @@
     <Compile Include="TransactionRepository.fs" />
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
+    <Compile Include="ApiKeyRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
     <Compile Include="Auth.fs" />
+    <Compile Include="McpServer.fs" />
     <Compile Include="PricingWorker.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
