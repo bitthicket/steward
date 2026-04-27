@@ -13,6 +13,8 @@
     <Compile Include="AuthTests.fs" />
     <Compile Include="RlsIsolationTests.fs" />
     <Compile Include="AccountRepositoryTests.fs" />
+    <Compile Include="AkoyaClientTests.fs" />
+    <Compile Include="IngestionEndpointsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -27,6 +29,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BitThicket.Steward.Api\BitThicket.Steward.Api.fsproj" />
+    <ProjectReference Include="..\..\src\BitThicket.Steward.Ingestion.Akoya\BitThicket.Steward.Ingestion.Akoya.fsproj" />
   </ItemGroup>
 
 </Project>

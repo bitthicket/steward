@@ -1,0 +1,292 @@
+open System
+open System.IO
+open System.Net.Http
+open System.Net.Http.Headers
+open System.Text
+open System.Text.Json
+open System.Threading.Tasks
+open Falco
+open Falco.Routing
+open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Hosting
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
+open BitThicket.Steward.Ingestion.Akoya
+
+// ── Configuration ────────────────────────────────────────────────────────────
+
+let config = AkoyaConfig.fromEnvironment()
+
+let version =
+    let v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version
+    if isNull v then "0.0.0" else v.ToString()
+
+// ── JSON helpers ─────────────────────────────────────────────────────────────
+
+let readJsonBody (ctx: Microsoft.AspNetCore.Http.HttpContext) =
+    task {
+        use reader = new StreamReader(ctx.Request.Body, Encoding.UTF8)
+        let! json = reader.ReadToEndAsync()
+        return JsonDocument.Parse(json)
+    }
+
+let tryGetString (el: JsonElement) (name: string) =
+    match el.TryGetProperty(name) with
+    | true, p when p.ValueKind <> JsonValueKind.Null -> Some(p.GetString())
+    | _ -> None
+
+let tryGetGuid (el: JsonElement) (name: string) =
+    match tryGetString el name with
+    | Some s -> match Guid.TryParse(s) with true, g -> Some g | _ -> None
+    | None -> None
+
+let requireGuid (el: JsonElement) (name: string) =
+    match tryGetGuid el name with Some g -> g | None -> failwith $"Missing required field: {name}"
+
+// ── Service-auth wrapper ─────────────────────────────────────────────────────
+
+let requireServiceToken (next: HttpHandler) : HttpHandler = fun ctx ->
+    task {
+        let header =
+            match ctx.Request.Headers.TryGetValue("Authorization") with
+            | true, v when v.Count > 0 -> v.ToString()
+            | _ -> ""
+
+        let token =
+            if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
+                header.Substring(7)
+            else
+                ""
+
+        if token <> config.StewardServiceToken then
+            ctx.Response.StatusCode <- 401
+            do! Response.ofJson {| error = "Unauthorized" |} ctx
+        else
+            do! next ctx
+    }
+
+// ── Core API internal client ─────────────────────────────────────────────────
+
+module InternalApiClient =
+    let private buildRequest (method: string) (path: string) (body: string option) =
+        let url = $"{config.StewardApiBaseUrl.TrimEnd('/')}{path}"
+        let req =
+            match method.ToUpperInvariant() with
+            | "POST" -> new HttpRequestMessage(HttpMethod.Post, url)
+            | "GET" -> new HttpRequestMessage(HttpMethod.Get, url)
+            | _ -> new HttpRequestMessage(HttpMethod.Get, url)
+
+        req.Headers.Authorization <- AuthenticationHeaderValue("Bearer", config.StewardServiceToken)
+
+        match body with
+        | Some b ->
+            req.Content <- new StringContent(b, Encoding.UTF8, "application/json")
+        | None -> ()
+
+        req
+
+    let lookupConnection (http: HttpClient) (tenantId: Guid) (connectionId: Guid) =
+        task {
+            try
+                let root = System.Text.Json.Nodes.JsonObject()
+                root["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
+                root["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                let req = buildRequest "POST" "/internal/connections/lookup" (Some(root.ToJsonString()))
+                let! resp = http.SendAsync(req)
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    return Error $"Core API returned {(int)resp.StatusCode}: {body}"
+                else
+                    use doc = JsonDocument.Parse(body)
+                    let root = doc.RootElement
+                    let credentialRef = root.GetProperty("credentialRef").GetString()
+                    return Ok credentialRef
+            with ex ->
+                return Error $"Core API connection lookup failed: {ex.Message}"
+        }
+
+    let retrieveVaultToken (http: HttpClient) (tenantId: Guid) (credentialRef: string) =
+        task {
+            try
+                let root = System.Text.Json.Nodes.JsonObject()
+                root["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
+                root["credentialRef"] <- System.Text.Json.Nodes.JsonValue.Create(credentialRef)
+                let req = buildRequest "POST" "/internal/vault/retrieve" (Some(root.ToJsonString()))
+                let! resp = http.SendAsync(req)
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    return Error $"Core API returned {(int)resp.StatusCode}: {body}"
+                else
+                    use doc = JsonDocument.Parse(body)
+                    let root = doc.RootElement
+                    let accessToken = root.GetProperty("accessToken").GetString()
+                    let refreshToken =
+                        match root.TryGetProperty("refreshToken") with
+                        | true, p when p.ValueKind <> JsonValueKind.Null -> Some(p.GetString())
+                        | _ -> None
+                    let expiresAt =
+                        match root.TryGetProperty("expiresAt") with
+                        | true, p when p.ValueKind <> JsonValueKind.Null ->
+                            match DateTimeOffset.TryParse(p.GetString()) with
+                            | true, d -> Some d
+                            | _ -> None
+                        | _ -> None
+                    return Ok(accessToken, refreshToken, expiresAt)
+            with ex ->
+                return Error $"Core API vault retrieve failed: {ex.Message}"
+        }
+
+    let postTransactionsUpsert (http: HttpClient) (tenantId: Guid) (connectionId: Guid) (txns: NormalizedTransaction list) =
+        task {
+            try
+                let txnNodes =
+                    txns
+                    |> List.map (fun t ->
+                        let o = System.Text.Json.Nodes.JsonObject()
+                        o["externalId"] <- System.Text.Json.Nodes.JsonValue.Create(t.ExternalId)
+                        o["accountId"] <- System.Text.Json.Nodes.JsonValue.Create(t.AccountId)
+                        o["occurredAt"] <- System.Text.Json.Nodes.JsonValue.Create(t.OccurredAt.ToString("O"))
+                        match t.PostedAt with
+                        | Some d -> o["postedAt"] <- System.Text.Json.Nodes.JsonValue.Create(d.ToString("O"))
+                        | None -> ()
+                        o["amountMinor"] <- System.Text.Json.Nodes.JsonValue.Create(t.AmountMinor)
+                        o["currency"] <- System.Text.Json.Nodes.JsonValue.Create(t.Currency)
+                        o["description"] <- System.Text.Json.Nodes.JsonValue.Create(t.Description)
+                        match t.Merchant with
+                        | Some m -> o["merchant"] <- System.Text.Json.Nodes.JsonValue.Create(m)
+                        | None -> ()
+                        o :> System.Text.Json.Nodes.JsonNode)
+                    |> List.toArray
+
+                let root = System.Text.Json.Nodes.JsonObject()
+                root["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
+                root["userId"] <- System.Text.Json.Nodes.JsonValue.Create(Guid.Empty.ToString())
+                root["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                let arr = System.Text.Json.Nodes.JsonArray(txnNodes)
+                root["transactions"] <- arr
+
+                let req = buildRequest "POST" "/internal/ingestion/upsert" (Some(root.ToJsonString()))
+                let! resp = http.SendAsync(req)
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    return Error $"Core API returned {(int)resp.StatusCode}: {body}"
+                else
+                    return Ok body
+            with ex ->
+                return Error $"Core API request failed: {ex.Message}"
+        }
+
+// ── Route handlers ───────────────────────────────────────────────────────────
+
+let healthHandler : HttpHandler = fun ctx ->
+    Response.ofJson {| status = "ok"; version = version; service = "akoya-ingestion" |} ctx
+
+let syncTriggerHandler (client: IAkoyaClient) (http: HttpClient) (logger: ILogger) : HttpHandler = fun ctx ->
+    task {
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+
+        let tenantId = requireGuid root "tenantId"
+        let connectionId = requireGuid root "connectionId"
+        let accountIdOpt = tryGetString root "accountId"
+
+        logger.LogInformation(
+            "Sync triggered for tenant={TenantId} connection={ConnectionId} account={AccountId}",
+            tenantId, connectionId, (accountIdOpt |> Option.defaultValue "(all)"))
+
+        // 1. Lookup connection to get credential ref
+        let! credentialRefResult = InternalApiClient.lookupConnection http tenantId connectionId
+        match credentialRefResult with
+        | Error msg ->
+            logger.LogError("Failed to lookup connection: {Message}", msg)
+            ctx.Response.StatusCode <- 502
+            do! Response.ofJson {| error = "Connection lookup failed"; detail = msg |} ctx
+        | Ok credentialRef ->
+            // 2. Retrieve access token from vault
+            let! tokenResult = InternalApiClient.retrieveVaultToken http tenantId credentialRef
+            match tokenResult with
+            | Error msg ->
+                logger.LogError("Failed to retrieve vault token: {Message}", msg)
+                ctx.Response.StatusCode <- 502
+                do! Response.ofJson {| error = "Token retrieval failed"; detail = msg |} ctx
+            | Ok(accessToken, _refreshToken, _expiresAt) ->
+                // 3. Fetch accounts from Akoya FDX
+                let! accounts = client.FetchAccountsAsync(accessToken)
+
+                let accountsToSync =
+                    match accountIdOpt with
+                    | Some accountId -> accounts |> List.filter (fun a -> a.AccountId = accountId)
+                    | None -> accounts
+
+                logger.LogInformation(
+                    "Fetched {AccountCount} accounts from Akoya for tenant={TenantId}",
+                    accountsToSync.Length, tenantId)
+
+                // 4. Fetch transactions for each account and normalize
+                let mutable allNormalized : NormalizedTransaction list = []
+
+                for account in accountsToSync do
+                    let! txns = client.FetchTransactionsAsync(accessToken, account.AccountId)
+                    let normalized = txns |> List.map AkoyaNormalization.normalize
+                    allNormalized <- allNormalized @ normalized
+                    logger.LogInformation(
+                        "Fetched {TxnCount} transactions for account={AccountId}",
+                        txns.Length, account.AccountId)
+
+                // 5. Upsert transactions to Core API
+                let! upsertResult = InternalApiClient.postTransactionsUpsert http tenantId connectionId allNormalized
+
+                match upsertResult with
+                | Ok json ->
+                    let mutable upsertedCount = 0
+                    try
+                        use doc = JsonDocument.Parse(json)
+                        let created =
+                            match doc.RootElement.TryGetProperty("added") with
+                            | true, p -> p.GetInt32()
+                            | _ -> 0
+                        let updated =
+                            match doc.RootElement.TryGetProperty("updated") with
+                            | true, p -> p.GetInt32()
+                            | _ -> 0
+                        upsertedCount <- created + updated
+                    with _ ->
+                        upsertedCount <- allNormalized.Length
+
+                    let response =
+                        {|
+                            status = "completed"
+                            accountsFetched = accountsToSync.Length
+                            transactionsFetched = allNormalized.Length
+                            transactionsUpserted = upsertedCount
+                        |}
+                    do! Response.ofJson response ctx
+                | Error msg ->
+                    logger.LogError("Failed to upsert transactions: {Message}", msg)
+                    ctx.Response.StatusCode <- 502
+                    do! Response.ofJson {| error = "Core API upsert failed"; detail = msg |} ctx
+    }
+
+// ── Application bootstrap ────────────────────────────────────────────────────
+
+let builder = WebApplication.CreateBuilder()
+builder.WebHost.UseUrls($"http://0.0.0.0:{config.Port}") |> ignore
+
+builder.Services.AddSingleton<HttpClient>(new HttpClient()) |> ignore
+builder.Services.AddSingleton<IAkoyaClient>(fun sp ->
+    let http = sp.GetRequiredService<HttpClient>()
+    let logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("AkoyaClient")
+    AkoyaClient(config, http, logger) :> IAkoyaClient) |> ignore
+
+let wapp = builder.Build()
+
+wapp.UseRouting()
+    .UseFalco([
+        get "/health" healthHandler
+        post "/sync-trigger" (requireServiceToken (fun ctx ->
+            let client = ctx.RequestServices.GetRequiredService<IAkoyaClient>()
+            let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+            let logger = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("AkoyaSync")
+            (syncTriggerHandler client http logger) ctx))
+    ])
+    .Run(Response.ofPlainText "Not found")

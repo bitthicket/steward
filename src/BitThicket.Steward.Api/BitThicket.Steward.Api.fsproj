@@ -10,9 +10,14 @@
     <Compile Include="TenantContext.fs" />
     <Compile Include="Persistence.fs" />
     <Compile Include="AccountRepository.fs" />
+    <Compile Include="VaultService.fs" />
+    <Compile Include="TransactionRepository.fs" />
+    <Compile Include="DataFeedConnectionRepository.fs" />
+    <Compile Include="SyncEventRepository.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="PricingWorker.fs" />
+    <Compile Include="IngestionEndpoints.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
