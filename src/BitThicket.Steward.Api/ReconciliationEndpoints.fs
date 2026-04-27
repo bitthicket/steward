@@ -108,6 +108,15 @@ module private ReconciliationHelpers =
 module ReconciliationEndpoints =
     open ReconciliationHelpers
 
+    // GET /api/reconciliations
+    let listReconciliationsHandler : HttpHandler = fun ctx ->
+        task {
+            let repo = ctx.RequestServices.GetRequiredService<IReconciliationRepository>()
+            let! recons = repo.ListAsync()
+            let responses = recons |> List.map reconToResponse
+            do! Response.ofJson {| reconciliations = responses |} ctx
+        }
+
     // POST /api/reconciliations
     let createReconciliationHandler : HttpHandler = fun ctx ->
         task {

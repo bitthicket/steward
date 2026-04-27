@@ -100,7 +100,11 @@
 				<h1 class="text-2xl font-semibold text-gray-900">Steward</h1>
 				<p class="text-sm text-gray-500">Welcome back, {auth.user.displayName}</p>
 			</div>
-			<a href="/logout" class="text-sm text-blue-600 hover:underline">Log out</a>
+			<div class="flex items-center gap-4">
+				<a href="/budgets" class="text-sm text-gray-600 hover:text-gray-900">Budgets</a>
+				<a href="/reconciliation" class="text-sm text-gray-600 hover:text-gray-900">Reconcile</a>
+				<a href="/logout" class="text-sm text-blue-600 hover:underline">Log out</a>
+			</div>
 		</header>
 
 		{#if onboarding && onboarding.currentStep < 5}

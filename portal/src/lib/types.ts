@@ -105,3 +105,84 @@ export interface Category {
 	name: string;
 	color: string | null;
 }
+
+// ── Budgets ────────────────────────────────────────────────────────────────
+
+export type BudgetPeriod = 'monthly' | 'biweekly' | 'weekly';
+export type BudgetStyle = 'zeroBased' | 'envelope' | 'flexible' | 'traditionalLimits';
+
+export interface BudgetPeriodCategory {
+	categoryId: string;
+	allocatedMinor: number;
+	openingBalanceMinor: number;
+	rolloverBalanceMinor: number;
+	currency: string;
+	rolloverEnabled: boolean;
+}
+
+export interface BudgetCurrentPeriod {
+	id: string;
+	startDate: string;
+	endDate: string;
+	status: 'Open' | 'Closed';
+	allocations: BudgetPeriodCategory[];
+}
+
+export interface Budget {
+	id: string;
+	name: string;
+	period: BudgetPeriod;
+	currency: string;
+	style: BudgetStyle;
+	incomeMinor: number;
+	isActive: boolean;
+	startsOn: string;
+	currentPeriod: BudgetCurrentPeriod | null;
+}
+
+export interface BudgetReportTotals {
+	allocatedMinor: number;
+	spentMinor: number;
+	remainingMinor: number;
+	currency: string;
+}
+
+export interface BudgetReportCategoryItem {
+	categoryId: string;
+	name: string;
+	allocatedMinor: number;
+	spentMinor: number;
+	remainingMinor: number;
+	rolloverBalanceMinor: number;
+	percentUsed: number;
+	currency: string;
+}
+
+export interface BudgetReport {
+	periodId: string;
+	totals: BudgetReportTotals;
+	byCategory: BudgetReportCategoryItem[];
+	displayCurrency: string;
+}
+
+// ── Reconciliations ────────────────────────────────────────────────────────
+
+export type ReconciliationStatus = 'open' | 'completed' | 'aborted';
+
+export interface Reconciliation {
+	id: string;
+	accountId: string;
+	statementDate: string;
+	statementBalanceMinor: number;
+	currency: string;
+	status: ReconciliationStatus;
+	note: string | null;
+	createdByUserId: string;
+	startedAt: string;
+	completedAt: string | null;
+}
+
+export interface ReconciliationWithTransactions extends Reconciliation {
+	includedTransactions: Transaction[];
+	diffMinor: number;
+}
