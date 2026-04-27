@@ -569,6 +569,57 @@ let internalConnectionCredentialsHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson credsResponse ctx
     }
 
+// Shared sync trigger logic used by both the internal endpoint and the public API.
+let triggerSyncForConnectionAsync (http: HttpClient) (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) (connectionId: Guid) =
+    task {
+        let ctx =
+            match accessor.Context with
+            | Some c -> c
+            | None -> { TenantId = Guid.Empty; UserId = Guid.Empty }
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let! connOpt = connRepo.GetAsync(connectionId)
+        match connOpt with
+        | None -> return Error "Connection not found"
+        | Some conn ->
+            match DataFeedConnection.providerOf conn.Metadata with
+            | DataFeedProvider.Plaid ->
+                match plaidIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(ctx.TenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        return Error $"Plaid ingestion failed: {body}"
+                    else
+                        return Ok {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |}
+                | _ ->
+                    return Error "Plaid ingestion URL or service token not configured"
+            | DataFeedProvider.Akoya ->
+                match akoyaIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(ctx.TenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        return Error $"Akoya ingestion failed: {body}"
+                    else
+                        return Ok {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |}
+                | _ ->
+                    return Error "Akoya ingestion URL or service token not configured"
+            | _ ->
+                return Error "Provider not yet supported for sync trigger"
+    }
+
 // POST /internal/sync-trigger
 // Routes to the appropriate ingestion service based on the connection's provider.
 let syncTriggerHandler : HttpHandler = fun ctx ->
@@ -577,61 +628,33 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
         let root = doc.RootElement
         let tenantId = requireGuid root "tenantId"
         let connectionId = requireGuid root "connectionId"
-
         let accessor = makeManualAccessor tenantId
         let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
-        let connRepo = DataFeedConnectionRepository.create factory accessor
-        let! connOpt = connRepo.GetAsync(connectionId)
+        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
+        match result with
+        | Ok resp -> do! Response.ofJson resp ctx
+        | Error msg ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = msg |} ctx
+    }
 
-        match connOpt with
-        | None ->
+// POST /api/connections/{connectionId}/sync
+// Public sync trigger endpoint.
+let syncConnectionHandler (connectionId: Guid) : HttpHandler = fun ctx ->
+    task {
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
+        match result with
+        | Ok resp -> do! Response.ofJson resp ctx
+        | Error "Connection not found" ->
             ctx.Response.StatusCode <- 404
             do! Response.ofJson {| error = "Connection not found" |} ctx
-        | Some conn ->
-            match DataFeedConnection.providerOf conn.Metadata with
-            | DataFeedProvider.Plaid ->
-                match plaidIngestionUrl, serviceToken with
-                | Some url, Some token ->
-                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
-                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
-                    let payload = System.Text.Json.Nodes.JsonObject()
-                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
-                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
-                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
-                    let! resp = http.SendAsync(req)
-                    let! body = resp.Content.ReadAsStringAsync()
-                    if not resp.IsSuccessStatusCode then
-                        ctx.Response.StatusCode <- (int)resp.StatusCode
-                        do! Response.ofJson {| error = "Plaid ingestion failed"; detail = body |} ctx
-                    else
-                        do! Response.ofJson {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |} ctx
-                | _ ->
-                    ctx.Response.StatusCode <- 503
-                    do! Response.ofJson {| error = "Plaid ingestion URL or service token not configured" |} ctx
-            | DataFeedProvider.Akoya ->
-                match akoyaIngestionUrl, serviceToken with
-                | Some url, Some token ->
-                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
-                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
-                    let payload = System.Text.Json.Nodes.JsonObject()
-                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
-                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
-                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
-                    let! resp = http.SendAsync(req)
-                    let! body = resp.Content.ReadAsStringAsync()
-                    if not resp.IsSuccessStatusCode then
-                        ctx.Response.StatusCode <- (int)resp.StatusCode
-                        do! Response.ofJson {| error = "Akoya ingestion failed"; detail = body |} ctx
-                    else
-                        do! Response.ofJson {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |} ctx
-                | _ ->
-                    ctx.Response.StatusCode <- 503
-                    do! Response.ofJson {| error = "Akoya ingestion URL or service token not configured" |} ctx
-            | _ ->
-                ctx.Response.StatusCode <- 501
-                do! Response.ofJson {| error = "Provider not yet supported for sync trigger" |} ctx
+        | Error msg ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = msg |} ctx
     }
 
 // POST /webhooks/plaid
@@ -777,6 +800,9 @@ wapp.UseRouting()
         post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
+        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            syncConnectionHandler connectionId ctx))
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
