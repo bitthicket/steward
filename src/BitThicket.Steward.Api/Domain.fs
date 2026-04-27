@@ -561,6 +561,25 @@ type CreditCardPayment = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// API Keys
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ApiKey = {
+    Id: Guid
+    TenantId: Guid
+    UserId: Guid
+    DisplayName: string
+    KeyHash: string
+    KeyPrefix: string
+    Role: string
+    Scopes: string list
+    ExpiresAt: DateTimeOffset option
+    LastUsedAt: DateTimeOffset option
+    RevokedAt: DateTimeOffset option
+    CreatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // User Preferences
 // ─────────────────────────────────────────────────────────────────────────────
 

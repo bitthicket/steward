@@ -199,7 +199,7 @@ module AuthHelpers =
 /// Authorization header, validates the JWT signature/lifetime/issuer/audience,
 /// and stores a TenantContext value in HttpContext.Items for the scoped
 /// ITenantContextAccessor to consume.
-type TenantContextMiddleware(next: RequestDelegate, authConfig: AuthConfig) =
+type TenantContextMiddleware(next: RequestDelegate, authConfig: AuthConfig, dbFactory: IDbConnectionFactory) =
     member _.InvokeAsync(ctx: HttpContext) =
         task {
             let tryParseGuid (str: string) =
@@ -212,6 +212,7 @@ type TenantContextMiddleware(next: RequestDelegate, authConfig: AuthConfig) =
                 | true, el when el.ValueKind = JsonValueKind.String -> Some(el.GetString())
                 | _ -> None
 
+            // Try Bearer token first
             match ctx.Request.Headers.TryGetValue("Authorization") with
             | true, values when values.Count > 0 ->
                 let header = values.[0]
@@ -230,6 +231,22 @@ type TenantContextMiddleware(next: RequestDelegate, authConfig: AuthConfig) =
                         | _ -> ()
                     | _ -> ()
             | _ -> ()
+
+            // Fall back to API key auth if no tenant context was set
+            if not (ctx.Items.ContainsKey("TenantContext")) then
+                match ctx.Request.Headers.TryGetValue("x-api-key") with
+                | true, apiKeyValues when apiKeyValues.Count > 0 ->
+                    let apiKey = apiKeyValues.[0]
+                    let! result = ApiKeyRepository.tryFindByKeyAsync dbFactory apiKey
+                    match result with
+                    | Some (keyRecord, tc) ->
+                        ctx.Items["TenantContext"] <- tc
+                        ctx.Items["TenantRole"] <- keyRecord.Role
+                        ctx.Items["ApiKeyId"] <- keyRecord.Id
+                        // Fire-and-forget update last_used_at
+                        do! ApiKeyRepository.updateLastUsedAsync dbFactory tc keyRecord.Id
+                    | None -> ()
+                | _ -> ()
 
             return! next.Invoke(ctx)
         }
@@ -351,6 +368,89 @@ module Auth =
                                     "mr", m.role
                                 ] (TimeSpan.FromHours(1.0))
                             do! Response.ofJson {| accessToken = token |} ctx
+        }
+
+    // POST /api/api-keys
+    let createApiKeyHandler : HttpHandler = fun ctx ->
+        task {
+            let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+            let! doc = AuthJson.readBody ctx
+            let displayName =
+                match doc.RootElement.TryGetProperty("displayName") with
+                | true, el when el.ValueKind <> JsonValueKind.Null -> el.GetString()
+                | _ -> "API Key"
+            let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+            match accessor.Context with
+            | None ->
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            | Some tc ->
+                let fullKey, prefix, hash = ApiKeyRepository.generateKey()
+                let apiKey: ApiKey = {
+                    Id = Guid.NewGuid()
+                    TenantId = tc.TenantId
+                    UserId = tc.UserId
+                    DisplayName = displayName
+                    KeyHash = hash
+                    KeyPrefix = prefix
+                    Role =
+                        match ctx.Items.TryGetValue("TenantRole") with
+                        | true, (:? string as r) -> r
+                        | _ -> "member"
+                    Scopes = []
+                    ExpiresAt = None
+                    LastUsedAt = None
+                    RevokedAt = None
+                    CreatedAt = DateTimeOffset.UtcNow
+                }
+                let! _ = ApiKeyRepository.createAsync factory apiKey
+                do! Response.ofJson {| id = apiKey.Id; displayName = apiKey.DisplayName; keyPrefix = apiKey.KeyPrefix; key = fullKey |} ctx
+        }
+
+    // GET /api/api-keys
+    let listApiKeysHandler : HttpHandler = fun ctx ->
+        task {
+            let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+            let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+            match accessor.Context with
+            | None ->
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            | Some tc ->
+                let! keys = ApiKeyRepository.listByTenantAsync factory tc
+                let masked =
+                    keys
+                    |> List.map (fun k -> {|
+                        id = k.Id
+                        displayName = k.DisplayName
+                        keyPrefix = k.KeyPrefix
+                        role = k.Role
+                        scopes = k.Scopes
+                        expiresAt = k.ExpiresAt
+                        lastUsedAt = k.LastUsedAt
+                        revokedAt = k.RevokedAt
+                        createdAt = k.CreatedAt
+                    |})
+                do! Response.ofJson {| keys = masked |} ctx
+        }
+
+    // DELETE /api/api-keys/{keyId:guid}
+    let revokeApiKeyHandler (keyId: Guid) : HttpHandler = fun ctx ->
+        task {
+            let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+            let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+            match accessor.Context with
+            | None ->
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            | Some tc ->
+                let! ok = ApiKeyRepository.revokeAsync factory tc keyId
+                if ok then
+                    ctx.Response.StatusCode <- 204
+                    do! Response.ofEmpty ctx
+                else
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "API key not found or already revoked" |} ctx
         }
 
     // GET /me

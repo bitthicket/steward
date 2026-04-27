@@ -87,6 +87,10 @@ builder.Services.AddScoped<ICategoryRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     CategoryRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IApiKeyRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    ApiKeyRepository.create factory accessor) |> ignore
 let sharedHttpClient = new System.Net.Http.HttpClient()
 builder.Services.AddSingleton<HttpClient>(sharedHttpClient) |> ignore
 builder.Services.AddSingleton<IPriceProvider>(fun sp ->
@@ -555,5 +559,13 @@ wapp.UseRouting()
             BudgetEndpoints.closePeriodHandler budgetId periodId ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
+        // API key management
+        post "/api/api-keys" (AuthHelpers.requireAuth Auth.createApiKeyHandler)
+        get "/api/api-keys" (AuthHelpers.requireAuth Auth.listApiKeysHandler)
+        delete "/api/api-keys/{keyId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let keyId = ctx.Request.RouteValues.["keyId"] :?> Guid
+            Auth.revokeApiKeyHandler keyId ctx))
+        // MCP server route group
+        post "/mcp" (AuthHelpers.requireAuth McpServer.mcpHandler)
     ])
     .Run(Response.ofPlainText "Not found")
