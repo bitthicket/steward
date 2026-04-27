@@ -13,6 +13,9 @@
     <Compile Include="AuthTests.fs" />
     <Compile Include="RlsIsolationTests.fs" />
     <Compile Include="AccountRepositoryTests.fs" />
+    <Compile Include="CategoryRepositoryTests.fs" />
+    <Compile Include="TransactionRepositoryTests.fs" />
+    <Compile Include="BudgetRepositoryTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
