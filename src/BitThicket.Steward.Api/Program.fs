@@ -1,5 +1,6 @@
 open System
 open System.IO
+open System.Net.Http
 open System.Reflection
 open System.Text
 open System.Text.Json
@@ -13,6 +14,7 @@ open Microsoft.Extensions.Logging
 open Npgsql
 open BitThicket.Steward.Api
 open BitThicket.Steward.Api.Domain
+open BitThicket.Steward.Api.Vault
 open BitThicket.Steward.Pricing
 
 // Run DbUp before the web host starts. A failure here throws and the process
@@ -73,23 +75,36 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
-builder.Services.AddSingleton<IBudgetRepository>(fun sp ->
+builder.Services.AddScoped<IBudgetRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     BudgetRepository.create factory accessor) |> ignore
-builder.Services.AddSingleton<IBudgetPeriodRepository>(fun sp ->
+builder.Services.AddScoped<IBudgetPeriodRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     BudgetPeriodRepository.create factory accessor) |> ignore
-builder.Services.AddSingleton<ICategoryRepository>(fun sp ->
+builder.Services.AddScoped<ICategoryRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     CategoryRepository.create factory accessor) |> ignore
 let sharedHttpClient = new System.Net.Http.HttpClient()
+builder.Services.AddSingleton<HttpClient>(sharedHttpClient) |> ignore
 builder.Services.AddSingleton<IPriceProvider>(fun sp ->
     let db = sp.GetRequiredService<NpgsqlDataSource>()
     let log = sp.GetRequiredService<ILogger<CoinGeckoPriceProvider>>()
     CoinGeckoPriceProvider(sharedHttpClient, db, log) :> IPriceProvider) |> ignore
+builder.Services.AddSingleton<IVaultService>(VaultService(DbConnectionFactory(dataSource)) :> IVaultService) |> ignore
+builder.Services.AddScoped<IDataFeedConnectionRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    DataFeedConnectionRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IPlaidService>(fun sp ->
+    let config = PlaidConfig.fromEnvironment()
+    let http = sp.GetRequiredService<HttpClient>()
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let vault = sp.GetRequiredService<IVaultService>()
+    let log = sp.GetRequiredService<ILogger<PlaidService>>()
+    PlaidService(config, http, factory, vault, log) :> IPlaidService) |> ignore
 builder.Services.AddHostedService<PricingWorker>() |> ignore
 
 let wapp = builder.Build()
@@ -385,6 +400,120 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
         do! Response.ofJson {| created = created; updated = updated; matched = matched |} ctx
     }
 
+// POST /internal/transactions/remove
+let internalTransactionsRemoveHandler : HttpHandler = fun ctx ->
+    task {
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let tenantId = requireGuid root "tenantId"
+        let externalIdsEl = root.GetProperty("externalIds")
+        let externalIds = externalIdsEl.EnumerateArray() |> Seq.map (fun el -> el.GetString()) |> Seq.toList
+        let accessor = makeManualAccessor tenantId
+        let repo = TransactionRepository.create factory accessor
+        let! count = repo.DeleteByExternalIdsAsync(externalIds)
+        do! Response.ofJson {| removed = count |} ctx
+    }
+
+// POST /internal/connections/status
+let internalConnectionStatusHandler : HttpHandler = fun ctx ->
+    task {
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let connectionId = requireGuid root "id"
+        let statusStr = requireString root "status"
+        let messageOpt = tryGetString root "message"
+        let! connOpt = connRepo.GetAsync(connectionId)
+        match connOpt with
+        | None ->
+            ctx.Response.StatusCode <- 404
+            do! Response.ofJson {| error = "Connection not found" |} ctx
+        | Some conn ->
+            let newStatus =
+                match statusStr.ToLowerInvariant() with
+                | "active" -> ConnectionStatus.Active
+                | "needsreauth" -> ConnectionStatus.NeedsReauth
+                | "disabled" -> ConnectionStatus.Disabled
+                | "error" -> ConnectionStatus.Error(messageOpt |> Option.defaultValue "Unknown error")
+                | _ -> ConnectionStatus.Error($"Invalid status: {statusStr}")
+            let updated = { conn with Status = newStatus; UpdatedAt = DateTimeOffset.UtcNow }
+            do! connRepo.UpdateAsync(updated)
+            do! Response.ofJson {| status = "updated"; connectionId = connectionId |} ctx
+    }
+
+// POST /internal/sync-trigger
+let syncTriggerHandler : HttpHandler = fun ctx ->
+    task {
+        let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let tenantId = requireGuid root "tenantId"
+        let connectionId = requireGuid root "connectionId"
+        let! result = plaid.SyncConnectionAsync tenantId connectionId
+        do! Response.ofJson result ctx
+    }
+
+// POST /webhooks/plaid
+let plaidWebhookHandler : HttpHandler = fun ctx ->
+    task {
+        let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
+        let verificationHeader =
+            match ctx.Request.Headers.TryGetValue("Plaid-Verification") with
+            | true, v when v.Count > 0 -> v.ToString()
+            | _ -> ""
+        use ms = new MemoryStream()
+        do! ctx.Request.Body.CopyToAsync(ms)
+        let bodyBytes = ms.ToArray()
+        let! verified = plaid.VerifyWebhookAsync bodyBytes verificationHeader
+        if not verified then
+            ctx.Response.StatusCode <- 401
+            do! Response.ofJson {| error = "Webhook verification failed" |} ctx
+        else
+            let bodyJson = Encoding.UTF8.GetString(bodyBytes)
+            use doc = JsonDocument.Parse(bodyJson)
+            let root = doc.RootElement
+            let webhookType = root.GetProperty("webhook_type").GetString()
+            let webhookCode = root.GetProperty("webhook_code").GetString()
+            let itemId = root.GetProperty("item_id").GetString()
+            match webhookType, webhookCode with
+            | "TRANSACTIONS", "SYNC_UPDATES_AVAILABLE" ->
+                let connRepo = ctx.RequestServices.GetRequiredService<IDataFeedConnectionRepository>()
+                let! connOpt = connRepo.GetByItemIdAsync(itemId)
+                match connOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = $"No connection found for item_id {itemId}" |} ctx
+                | Some conn ->
+                    let! _ = plaid.SyncConnectionAsync conn.TenantId conn.Id
+                    do! Response.ofJson {| status = "sync_triggered" |} ctx
+            | "ITEM", "ERROR" ->
+                let errorCode =
+                    match root.TryGetProperty("error") with
+                    | true, err -> err.GetProperty("error_code").GetString()
+                    | _ -> "UNKNOWN"
+                let status =
+                    match errorCode with
+                    | "ITEM_LOGIN_REQUIRED" -> ConnectionStatus.NeedsReauth
+                    | _ -> ConnectionStatus.Error($"Plaid error: {errorCode}")
+                let connRepo = ctx.RequestServices.GetRequiredService<IDataFeedConnectionRepository>()
+                let! connOpt = connRepo.GetByItemIdAsync(itemId)
+                match connOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = $"No connection found for item_id {itemId}" |} ctx
+                | Some conn ->
+                    let updated = { conn with Status = status; UpdatedAt = DateTimeOffset.UtcNow }
+                    do! connRepo.UpdateAsync(updated)
+                    do! Response.ofJson {| status = "error_handled" |} ctx
+            | "WEBHOOK_UPDATE_ACKNOWLEDGED", _ ->
+                do! Response.ofJson {| status = "acknowledged" |} ctx
+            | _ ->
+                do! Response.ofJson {| status = "ignored"; webhookType = webhookType; webhookCode = webhookCode |} ctx
+    }
+
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
@@ -400,6 +529,10 @@ wapp.UseRouting()
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
+        post "/internal/transactions/remove" internalTransactionsRemoveHandler
+        post "/internal/connections/status" internalConnectionStatusHandler
+        post "/internal/sync-trigger" syncTriggerHandler
+        post "/webhooks/plaid" plaidWebhookHandler
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
         get "/api/budgets/{budgetId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
@@ -420,13 +553,6 @@ wapp.UseRouting()
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
             BudgetEndpoints.closePeriodHandler budgetId periodId ctx))
-        get "/api/budgets/{budgetId:guid}/periods/{periodId:guid}/report" (AuthHelpers.requireAuth (fun ctx ->
-            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
-            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
-            BudgetEndpoints.getReportHandler budgetId periodId ctx))
-        get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
-            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
-            BudgetEndpoints.getCurrentReportHandler budgetId ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
     ])
