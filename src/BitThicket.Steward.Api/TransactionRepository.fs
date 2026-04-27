@@ -7,12 +7,23 @@ open System.Threading.Tasks
 open Npgsql
 open BitThicket.Steward.Api.Domain
 
+/// Filter criteria for listing transactions.
+type TransactionListFilter = {
+    AccountId: Guid option
+    From: DateTimeOffset option
+    To: DateTimeOffset option
+    Status: TransactionStatus option
+    Limit: int
+    Cursor: (DateTimeOffset * Guid) option
+}
+
 /// Repository for tenant-scoped transactions.
 type ITransactionRepository =
     abstract GetAsync : id:Guid -> Task<Transaction option>
     abstract GetByExternalIdAsync : externalId:string * accountId:Guid -> Task<Transaction option>
     abstract ListAsync : unit -> Task<Transaction list>
     abstract ListByAccountAsync : accountId:Guid -> Task<Transaction list>
+    abstract ListAsync : filter:TransactionListFilter -> Task<Transaction list>
     abstract CreateAsync : transaction:Transaction -> Task<Guid>
     abstract UpdateAsync : transaction:Transaction -> Task<unit>
     abstract DeleteAsync : id:Guid -> Task<unit>
@@ -48,7 +59,7 @@ module TransactionRepository =
         | TransactionStatus.Cleared     -> "cleared"
         | TransactionStatus.Reconciled  -> "reconciled"
 
-    let private statusFromString (s: string) : TransactionStatus =
+    let internal statusFromString (s: string) : TransactionStatus =
         match s.ToLowerInvariant() with
         | "pending"     -> TransactionStatus.Pending
         | "needs_review"-> TransactionStatus.NeedsReview
@@ -94,13 +105,22 @@ module TransactionRepository =
             Source = sourceFromJsonb reader 11
             ExternalId = Sql.nullableString reader 12
             MatchedTransactionId = Sql.nullableGuid reader 13
-            TransferAccountId = Sql.nullableGuid reader 15
-            Status = statusFromString (reader.GetString(16))
-            MatchConfidence = Sql.nullableDecimal reader 17
-            SyncEventId = Sql.nullableGuid reader 18
-            CreatedAt = Sql.dateTimeOffset reader 19
-            UpdatedAt = Sql.dateTimeOffset reader 20
+            TransferAccountId = Sql.nullableGuid reader 14
+            Status = statusFromString (reader.GetString(15))
+            MatchConfidence = Sql.nullableDecimal reader 16
+            SyncEventId = Sql.nullableGuid reader 17
+            CreatedAt = Sql.dateTimeOffset reader 18
+            UpdatedAt = Sql.dateTimeOffset reader 19
+            DeletedAt = Sql.nullableDateTimeOffset reader 20
         }
+
+    // ── Column list helper ───────────────────────────────────────────────────
+
+    let private selectColumns =
+        """id, tenant_id, account_id, occurred_at, posted_at,
+           amount_minor, currency, description, merchant, memo,
+           category_id, source, external_id, matched_transaction_id, transfer_account_id,
+           status, match_confidence, sync_event_id, created_at, updated_at, deleted_at"""
 
     // ── CRUD implementations ─────────────────────────────────────────────────
 
@@ -109,11 +129,8 @@ module TransactionRepository =
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
-                          amount_minor, currency, description, merchant, memo,
-                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                          status, match_confidence, sync_event_id, created_at, updated_at
-                   FROM transactions WHERE id = $1"""
+                $"""SELECT {selectColumns}
+                   FROM transactions WHERE id = $1 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
@@ -126,11 +143,8 @@ module TransactionRepository =
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
-                          amount_minor, currency, description, merchant, memo,
-                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                          status, match_confidence, sync_event_id, created_at, updated_at
-                   FROM transactions WHERE external_id = $1 AND account_id = $2"""
+                $"""SELECT {selectColumns}
+                   FROM transactions WHERE external_id = $1 AND account_id = $2 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", externalId) |> ignore
             cmd.Parameters.AddWithValue("$2", accountId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
@@ -139,16 +153,14 @@ module TransactionRepository =
             return if hasRow then Some(mapTransaction reader) else None
         }
 
-    let listAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) =
+    let listAllAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
-                          amount_minor, currency, description, merchant, memo,
-                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                          status, match_confidence, sync_event_id, created_at, updated_at
+                $"""SELECT {selectColumns}
                    FROM transactions
+                   WHERE deleted_at IS NULL
                    ORDER BY occurred_at DESC
                    LIMIT 100"""
             let! reader = cmd.ExecuteReaderAsync()
@@ -164,14 +176,74 @@ module TransactionRepository =
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
-                          amount_minor, currency, description, merchant, memo,
-                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                          status, match_confidence, sync_event_id, created_at, updated_at
+                $"""SELECT {selectColumns}
                    FROM transactions
-                   WHERE account_id = $1
+                   WHERE account_id = $1 AND deleted_at IS NULL
                    ORDER BY occurred_at DESC"""
             cmd.Parameters.AddWithValue("$1", accountId) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let transactions = ResizeArray<Transaction>()
+            while! reader.ReadAsync() do
+                transactions.Add(mapTransaction reader)
+            return transactions |> Seq.toList
+        }
+
+    let listAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (filter: TransactionListFilter) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+
+            let conditions = ResizeArray<string>()
+            conditions.Add("deleted_at IS NULL")
+
+            match filter.AccountId with
+            | Some aid ->
+                conditions.Add("account_id = $1")
+                cmd.Parameters.AddWithValue("$1", aid) |> ignore
+            | None -> ()
+
+            let mutable paramIndex = 2
+
+            match filter.From with
+            | Some f ->
+                conditions.Add($"occurred_at >= ${paramIndex}")
+                cmd.Parameters.AddWithValue($"${paramIndex}", f.UtcDateTime) |> ignore
+                paramIndex <- paramIndex + 1
+            | None -> ()
+
+            match filter.To with
+            | Some t ->
+                conditions.Add($"occurred_at <= ${paramIndex}")
+                cmd.Parameters.AddWithValue($"${paramIndex}", t.UtcDateTime) |> ignore
+                paramIndex <- paramIndex + 1
+            | None -> ()
+
+            match filter.Status with
+            | Some s ->
+                conditions.Add($"status = ${paramIndex}")
+                cmd.Parameters.AddWithValue($"${paramIndex}", statusToString s) |> ignore
+                paramIndex <- paramIndex + 1
+            | None -> ()
+
+            match filter.Cursor with
+            | Some (occurredAt, id) ->
+                conditions.Add($"(occurred_at, id) < (${paramIndex}, ${paramIndex + 1})")
+                cmd.Parameters.AddWithValue($"${paramIndex}", occurredAt.UtcDateTime) |> ignore
+                cmd.Parameters.AddWithValue($"${paramIndex + 1}", id) |> ignore
+                paramIndex <- paramIndex + 2
+            | None -> ()
+
+            let whereClause = String.concat " AND " conditions
+            let limit = Math.Max(1, Math.Min(filter.Limit, 250))
+
+            cmd.CommandText <-
+                $"""SELECT {selectColumns}
+                   FROM transactions
+                   WHERE {whereClause}
+                   ORDER BY occurred_at DESC, id DESC
+                   LIMIT {limit + 1}"""
+
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
             let transactions = ResizeArray<Transaction>()
@@ -190,9 +262,9 @@ module TransactionRepository =
                        id, tenant_id, account_id, occurred_at, posted_at,
                        amount_minor, currency, description, merchant, memo,
                        category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                       status, match_confidence, sync_event_id, created_at, updated_at
+                       status, match_confidence, sync_event_id, created_at, updated_at, deleted_at
                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"""
+                             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"""
             cmd.Parameters.AddWithValue("$1", txn.Id) |> ignore
             cmd.Parameters.AddWithValue("$2", txn.TenantId) |> ignore
             cmd.Parameters.AddWithValue("$3", txn.AccountId) |> ignore
@@ -235,6 +307,9 @@ module TransactionRepository =
             | None -> cmd.Parameters.AddWithValue("$18", DBNull.Value) |> ignore
             cmd.Parameters.AddWithValue("$19", txn.CreatedAt.UtcDateTime) |> ignore
             cmd.Parameters.AddWithValue("$20", txn.UpdatedAt.UtcDateTime) |> ignore
+            match txn.DeletedAt with
+            | Some d -> cmd.Parameters.AddWithValue("$21", d.UtcDateTime) |> ignore
+            | None -> cmd.Parameters.AddWithValue("$21", DBNull.Value) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return txn.Id
         }
@@ -262,8 +337,9 @@ module TransactionRepository =
                        status = $14,
                        match_confidence = $15,
                        sync_event_id = $16,
-                       updated_at = $17
-                   WHERE id = $18"""
+                       updated_at = $17,
+                       deleted_at = $18
+                   WHERE id = $19 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", txn.AccountId) |> ignore
             cmd.Parameters.AddWithValue("$2", txn.OccurredAt.UtcDateTime) |> ignore
             match txn.PostedAt with
@@ -303,7 +379,10 @@ module TransactionRepository =
             | Some sid -> cmd.Parameters.AddWithValue("$16", sid) |> ignore
             | None -> cmd.Parameters.AddWithValue("$16", DBNull.Value) |> ignore
             cmd.Parameters.AddWithValue("$17", DateTimeOffset.UtcNow.UtcDateTime) |> ignore
-            cmd.Parameters.AddWithValue("$18", txn.Id) |> ignore
+            match txn.DeletedAt with
+            | Some d -> cmd.Parameters.AddWithValue("$18", d.UtcDateTime) |> ignore
+            | None -> cmd.Parameters.AddWithValue("$18", DBNull.Value) |> ignore
+            cmd.Parameters.AddWithValue("$19", txn.Id) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()
         }
@@ -312,7 +391,10 @@ module TransactionRepository =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
-            cmd.CommandText <- "DELETE FROM transactions WHERE id = $1"
+            cmd.CommandText <-
+                """UPDATE transactions
+                   SET deleted_at = now()
+                   WHERE id = $1 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()
@@ -336,15 +418,13 @@ module TransactionRepository =
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
-                          amount_minor, currency, description, merchant, memo,
-                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                          status, match_confidence, sync_event_id, created_at, updated_at
+                $"""SELECT {selectColumns}
                    FROM transactions
                    WHERE account_id = $1
                      AND source ->> 'type' = 'manual'
                      AND status IN ('pending', 'cleared')
                      AND matched_transaction_id IS NULL
+                     AND deleted_at IS NULL
                    ORDER BY occurred_at DESC"""
             cmd.Parameters.AddWithValue("$1", accountId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
@@ -360,12 +440,10 @@ module TransactionRepository =
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
-                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
-                          amount_minor, currency, description, merchant, memo,
-                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
-                          status, match_confidence, sync_event_id, created_at, updated_at
+                $"""SELECT {selectColumns}
                    FROM transactions
                    WHERE status = 'needs_review'
+                     AND deleted_at IS NULL
                    ORDER BY occurred_at DESC"""
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
@@ -386,8 +464,9 @@ module TransactionRepository =
         { new ITransactionRepository with
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
             member _.GetByExternalIdAsync(externalId, accountId) = getByExternalIdAsync factory (requireCtx()) (externalId, accountId)
-            member _.ListAsync() = listAsync factory (requireCtx())
+            member _.ListAsync() = listAllAsync factory (requireCtx())
             member _.ListByAccountAsync(accountId) = listByAccountAsync factory (requireCtx()) accountId
+            member _.ListAsync(filter) = listAsync factory (requireCtx()) filter
             member _.CreateAsync(txn) = createAsync factory txn
             member _.UpdateAsync(txn) = updateAsync factory txn
             member _.DeleteAsync(id) = deleteAsync factory (requireCtx()) id

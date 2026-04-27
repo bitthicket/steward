@@ -9,7 +9,9 @@ open Falco
 open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
+open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.FileProviders
 open Microsoft.Extensions.Logging
 open Npgsql
 open BitThicket.Steward.Api
@@ -103,6 +105,10 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
+builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    ReconciliationRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IBudgetRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -422,6 +428,7 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
                       Status = TransactionStatus.Cleared
                       MatchConfidence = None
                       SyncEventId = syncEventIdOpt
+                      DeletedAt = None
                       CreatedAt = now
                       UpdatedAt = now }
 
@@ -612,6 +619,17 @@ let plaidWebhookHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson {| status = "ignored"; webhookType = webhookType; webhookCode = webhookCode |} ctx
     }
 
+// ── Static files (portal SPA) ────────────────────────────────────────────────
+
+let portalPath = Path.Combine(wapp.Environment.WebRootPath, "portal")
+if Directory.Exists(portalPath) then
+    wapp.UseStaticFiles(
+        new StaticFileOptions(
+            RequestPath = PathString("/portal"),
+            FileProvider = new PhysicalFileProvider(portalPath)
+        )
+    ) |> ignore
+
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
@@ -622,6 +640,7 @@ wapp.UseRouting()
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
         post "/auth/register" Auth.registerHandler
         post "/auth/login" Auth.loginHandler
+        post "/api/auth/cookie-set" Auth.cookieSetHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
         // Accounts
@@ -639,6 +658,30 @@ wapp.UseRouting()
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Categories
+        get "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.listCategoriesHandler)
+        get "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.getCategoryHandler categoryId ctx))
+        post "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.createCategoryHandler)
+        patch "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.updateCategoryHandler categoryId ctx))
+        delete "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.deleteCategoryHandler categoryId ctx))
+        // Transactions
+        get "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.listTransactionsHandler)
+        get "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.getTransactionHandler txnId ctx))
+        post "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.createTransactionHandler)
+        patch "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.updateTransactionHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.deleteTransactionHandler txnId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
@@ -697,6 +740,20 @@ wapp.UseRouting()
             BudgetEndpoints.getCurrentReportHandler budgetId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
+        // Reconciliations
+        post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
+        get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.getReconciliationHandler id ctx))
+        patch "/api/reconciliations/{reconciliationId:guid}/transactions" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.updateTransactionsHandler id ctx))
+        post "/api/reconciliations/{reconciliationId:guid}/complete" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.completeHandler id ctx))
+        post "/api/reconciliations/{reconciliationId:guid}/abort" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.abortHandler id ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
         // API key management
@@ -707,5 +764,18 @@ wapp.UseRouting()
             Auth.revokeApiKeyHandler keyId ctx))
         // MCP server route group
         post "/mcp" (AuthHelpers.requireAuth McpServer.mcpHandler)
+        // SPA fallthrough for portal routes
+        get "/portal/{*path}" (fun ctx ->
+            let indexPath = Path.Combine(portalPath, "index.html")
+            if File.Exists(indexPath) then
+                task {
+                    ctx.Response.ContentType <- "text/html"
+                    let! bytes = File.ReadAllBytesAsync(indexPath)
+                    do! ctx.Response.Body.WriteAsync(bytes, 0, bytes.Length)
+                }
+            else
+                ctx.Response.StatusCode <- 404
+                Response.ofPlainText "Portal not built" ctx
+        )
     ])
     .Run(Response.ofPlainText "Not found")

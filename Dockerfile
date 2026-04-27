@@ -1,6 +1,14 @@
 # syntax=docker/dockerfile:1
 
-# --- build stage ---------------------------------------------------------
+# --- portal build stage --------------------------------------------------
+FROM node:22-alpine AS portal-build
+WORKDIR /portal
+COPY portal/package.json portal/package-lock.json ./
+RUN npm ci
+COPY portal/ ./
+RUN npm run build
+
+# --- API build stage -----------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS build
 WORKDIR /src
 
@@ -19,6 +27,7 @@ RUN dotnet publish src/BitThicket.Steward.Api/BitThicket.Steward.Api.fsproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS runtime
 WORKDIR /app
 COPY --from=build /app/publish ./
+COPY --from=portal-build /portal/build ./wwwroot/portal
 
 # Northflank injects $PORT; default keeps the container runnable standalone.
 ENV ASPNETCORE_ENVIRONMENT=Production \

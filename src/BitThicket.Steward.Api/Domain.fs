@@ -182,6 +182,9 @@ type Transaction = {
     /// Transaction date — when the activity happened from the user's perspective
     /// (e.g. the moment of swipe). This is the date users recall and the UI sorts by.
     OccurredAt: DateTimeOffset
+    /// Soft-delete timestamp. When Some the transaction is logically deleted
+    /// and excluded from list/get results.
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }
@@ -273,7 +276,11 @@ type Category = {
     Name: string
     ParentCategoryId: Guid option
     IsSystem: bool
+    CurrencyCode: string
+    RolloverEnabled: bool
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -514,9 +521,9 @@ type RemediationAttempt = {
 
 [<RequireQualifiedAccess>]
 type ReconciliationStatus =
-    | InProgress
+    | Open
     | Completed
-    | Abandoned
+    | Aborted
 
 type Reconciliation = {
     Id: Guid
@@ -525,8 +532,8 @@ type Reconciliation = {
     StatementBalance: Money
     StatementDate: DateOnly
     Status: ReconciliationStatus
-    MatchedCount: int
-    UnmatchedCount: int
+    Note: string option
+    CreatedByUserId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
 }

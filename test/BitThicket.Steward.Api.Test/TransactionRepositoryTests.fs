@@ -97,6 +97,7 @@ let private makeTransaction (tenantId: Guid) (accountId: Guid) (amount: decimal)
         Status = TransactionStatus.Pending
         MatchConfidence = None
         SyncEventId = None
+        DeletedAt = None
         CreatedAt = now
         UpdatedAt = now
     }
