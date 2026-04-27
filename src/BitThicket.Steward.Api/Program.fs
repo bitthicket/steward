@@ -420,6 +420,13 @@ wapp.UseRouting()
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
             BudgetEndpoints.closePeriodHandler budgetId periodId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/{periodId:guid}/report" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            BudgetEndpoints.getReportHandler budgetId periodId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            BudgetEndpoints.getCurrentReportHandler budgetId ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
     ])
