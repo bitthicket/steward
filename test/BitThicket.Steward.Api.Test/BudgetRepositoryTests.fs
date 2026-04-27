@@ -77,6 +77,7 @@ let private makeBudget (tenantId: Guid) (userId: Guid) (name: string) =
         Style = BudgetingStyle.ZeroBased
         Period = BudgetPeriod.Monthly
         CurrencyCode = "USD"
+        Income = Money.zero "USD"
         IsActive = true
         StartsOn = DateOnly.FromDateTime(DateTime.UtcNow)
         CreatedAt = now

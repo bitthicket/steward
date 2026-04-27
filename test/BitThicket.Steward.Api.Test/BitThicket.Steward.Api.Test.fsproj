@@ -16,6 +16,7 @@
     <Compile Include="CategoryRepositoryTests.fs" />
     <Compile Include="TransactionRepositoryTests.fs" />
     <Compile Include="BudgetRepositoryTests.fs" />
+    <Compile Include="BudgetPeriodRepositoryTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

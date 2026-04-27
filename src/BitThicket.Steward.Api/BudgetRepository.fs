@@ -32,11 +32,15 @@ module BudgetRepository =
     let private styleToString (s: BudgetingStyle) : string =
         match s with
         | BudgetingStyle.ZeroBased        -> "zero_based"
+        | BudgetingStyle.Envelope         -> "envelope"
+        | BudgetingStyle.Flexible         -> "flexible"
         | BudgetingStyle.TraditionalLimits -> "traditional_limits"
 
     let private styleFromString (s: string) : BudgetingStyle =
         match s.ToLowerInvariant() with
         | "zero_based"        -> BudgetingStyle.ZeroBased
+        | "envelope"          -> BudgetingStyle.Envelope
+        | "flexible"          -> BudgetingStyle.Flexible
         | "traditional_limits" -> BudgetingStyle.TraditionalLimits
         | _                   -> failwith $"Unknown budgeting style: {s}"
 
@@ -73,10 +77,11 @@ module BudgetRepository =
             Style = styleFromString (reader.GetString(4))
             Period = periodFromJsonb reader 5
             CurrencyCode = reader.GetString(6)
-            IsActive = reader.GetBoolean(7)
-            StartsOn = DateOnly.FromDateTime(reader.GetDateTime(8))
-            CreatedAt = Sql.dateTimeOffset reader 9
-            UpdatedAt = Sql.dateTimeOffset reader 10
+            Income = fromMinor (reader.GetInt64(7)) (reader.GetString(8))
+            IsActive = reader.GetBoolean(9)
+            StartsOn = DateOnly.FromDateTime(reader.GetDateTime(10))
+            CreatedAt = Sql.dateTimeOffset reader 11
+            UpdatedAt = Sql.dateTimeOffset reader 12
         }
 
     // ── BudgetCategory mapping ──────────────────────────────────────────────
@@ -100,7 +105,7 @@ module BudgetRepository =
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, name, style, period,
-                          currency, is_active, starts_on, created_at, updated_at
+                          currency, income_minor, income_currency, is_active, starts_on, created_at, updated_at
                    FROM budgets WHERE id = $1"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
@@ -115,7 +120,7 @@ module BudgetRepository =
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, name, style, period,
-                          currency, is_active, starts_on, created_at, updated_at
+                          currency, income_minor, income_currency, is_active, starts_on, created_at, updated_at
                    FROM budgets
                    ORDER BY created_at DESC"""
             let! reader = cmd.ExecuteReaderAsync()
@@ -134,8 +139,8 @@ module BudgetRepository =
             cmd.CommandText <-
                 """INSERT INTO budgets (
                        id, tenant_id, user_id, name, style, period,
-                       currency, is_active, starts_on, created_at, updated_at
-                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"""
+                       currency, income_minor, income_currency, is_active, starts_on, created_at, updated_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"""
             cmd.Parameters.AddWithValue("$1", budget.Id) |> ignore
             cmd.Parameters.AddWithValue("$2", budget.TenantId) |> ignore
             cmd.Parameters.AddWithValue("$3", budget.UserId) |> ignore
@@ -147,10 +152,12 @@ module BudgetRepository =
             periodParam.Value <- periodToJsonb budget.Period
             cmd.Parameters.Add(periodParam) |> ignore
             cmd.Parameters.AddWithValue("$7", budget.CurrencyCode) |> ignore
-            cmd.Parameters.AddWithValue("$8", budget.IsActive) |> ignore
-            cmd.Parameters.AddWithValue("$9", budget.StartsOn.ToDateTime(TimeOnly.MinValue)) |> ignore
-            cmd.Parameters.AddWithValue("$10", budget.CreatedAt.UtcDateTime) |> ignore
-            cmd.Parameters.AddWithValue("$11", budget.UpdatedAt.UtcDateTime) |> ignore
+            cmd.Parameters.AddWithValue("$8", toMinor budget.Income) |> ignore
+            cmd.Parameters.AddWithValue("$9", budget.Income.CurrencyCode) |> ignore
+            cmd.Parameters.AddWithValue("$10", budget.IsActive) |> ignore
+            cmd.Parameters.AddWithValue("$11", budget.StartsOn.ToDateTime(TimeOnly.MinValue)) |> ignore
+            cmd.Parameters.AddWithValue("$12", budget.CreatedAt.UtcDateTime) |> ignore
+            cmd.Parameters.AddWithValue("$13", budget.UpdatedAt.UtcDateTime) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return budget.Id
         }
@@ -166,10 +173,12 @@ module BudgetRepository =
                        style = $2,
                        period = $3,
                        currency = $4,
-                       is_active = $5,
-                       starts_on = $6,
-                       updated_at = $7
-                   WHERE id = $8"""
+                       income_minor = $5,
+                       income_currency = $6,
+                       is_active = $7,
+                       starts_on = $8,
+                       updated_at = $9
+                   WHERE id = $10"""
             cmd.Parameters.AddWithValue("$1", budget.Name) |> ignore
             cmd.Parameters.AddWithValue("$2", styleToString budget.Style) |> ignore
             let periodParam = cmd.CreateParameter()
@@ -178,10 +187,12 @@ module BudgetRepository =
             periodParam.Value <- periodToJsonb budget.Period
             cmd.Parameters.Add(periodParam) |> ignore
             cmd.Parameters.AddWithValue("$4", budget.CurrencyCode) |> ignore
-            cmd.Parameters.AddWithValue("$5", budget.IsActive) |> ignore
-            cmd.Parameters.AddWithValue("$6", budget.StartsOn.ToDateTime(TimeOnly.MinValue)) |> ignore
-            cmd.Parameters.AddWithValue("$7", DateTimeOffset.UtcNow.UtcDateTime) |> ignore
-            cmd.Parameters.AddWithValue("$8", budget.Id) |> ignore
+            cmd.Parameters.AddWithValue("$5", toMinor budget.Income) |> ignore
+            cmd.Parameters.AddWithValue("$6", budget.Income.CurrencyCode) |> ignore
+            cmd.Parameters.AddWithValue("$7", budget.IsActive) |> ignore
+            cmd.Parameters.AddWithValue("$8", budget.StartsOn.ToDateTime(TimeOnly.MinValue)) |> ignore
+            cmd.Parameters.AddWithValue("$9", DateTimeOffset.UtcNow.UtcDateTime) |> ignore
+            cmd.Parameters.AddWithValue("$10", budget.Id) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()
         }
