@@ -105,6 +105,17 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
+builder.Services.AddScoped<ITransactionSplitRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    TransactionSplitRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAttachmentStorage>(fun sp ->
+    let log = sp.GetRequiredService<ILogger<LocalAttachmentStorage>>()
+    AttachmentStorage.fromEnvironment log) |> ignore
+builder.Services.AddScoped<IAttachmentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    AttachmentRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -682,6 +693,31 @@ wapp.UseRouting()
         delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             TransactionEndpoints.deleteTransactionHandler txnId ctx))
+        // Transaction splits
+        get "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.listSplitsHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.createSplitsHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitAttachmentEndpoints.deleteSplitHandler txnId splitId ctx))
+        // Transaction attachments
+        post "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.uploadAttachmentHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits/{splitId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitAttachmentEndpoints.uploadSplitAttachmentHandler txnId splitId ctx))
+        get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            SplitAttachmentEndpoints.getAttachmentHandler attachmentId ctx))
+        delete "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            SplitAttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
@@ -738,6 +774,13 @@ wapp.UseRouting()
         get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             BudgetEndpoints.getCurrentReportHandler budgetId ctx))
+        // Exports
+        get "/api/exports/transactions.csv" (AuthHelpers.requireAuth ExportEndpoints.exportTransactionsHandler)
+        get "/api/exports/accounts.csv" (AuthHelpers.requireAuth ExportEndpoints.exportAccountsHandler)
+        get "/api/exports/budgets/{budgetId:guid}/period/{periodId:guid}.csv" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            ExportEndpoints.exportBudgetPeriodHandler budgetId periodId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
         // Reconciliations
