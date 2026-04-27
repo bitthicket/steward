@@ -9,7 +9,7 @@ AI-first personal finance tool for budgeting and expense tracking.
 | Language | F# on .NET 10 | Strong type system for financial domain modeling, algebraic data types for clean state machines, good ecosystem |
 | Web framework | [Falco](https://github.com/pimbrouwers/Falco) v5 | Lightweight, functional-first ASP.NET Core wrapper — fast to ship, no ceremony |
 | Testing | xUnit + FsUnit + Unquote | Standard .NET test stack with F#-idiomatic assertion libraries |
-| Data | TBD (SQLite for local-first, PostgreSQL for hosted) | Defer storage backend choice until we need persistence |
+| Data | PostgreSQL (managed Northflank add-on) + [DbUp](https://dbup.readthedocs.io/) | Migrations embedded in the API, applied on startup. See [ADR-007](docs/adr/007-deployment-and-hosting.md) |
 
 ## Architecture
 
@@ -87,3 +87,50 @@ dotnet build
 dotnet run --project src/BitThicket.Steward.Api
 dotnet test
 ```
+
+## Deployment
+
+The Core API runs on Northflank ([ADR-007](docs/adr/007-deployment-and-hosting.md)).
+
+- **Live URL**: https://http--steward-api--cm284mpx4hvd.code.run
+- **Health check**: https://http--steward-api--cm284mpx4hvd.code.run/health
+- **Northflank project**: `steward-finance` / service `steward-api` (region `us-central`, deployment plan `nf-compute-10`)
+
+### Redeploying
+
+Northflank watches the `master` branch and rebuilds on every push:
+
+```bash
+git push origin master
+```
+
+That's it — Northflank pulls the new commit, runs `docker build` against the repo-root `Dockerfile`, and rolls the container.
+
+### Local container
+
+The API runs DbUp on startup against `STEWARD_DB_CONNECTIONSTRING`; the
+container exits non-zero if the variable is missing or migrations fail.
+
+```bash
+# Postgres for local runs
+docker run -d --name steward-pg \
+    -e POSTGRES_USER=steward -e POSTGRES_PASSWORD=steward -e POSTGRES_DB=steward \
+    -p 55432:5432 postgres:16-alpine
+
+docker build -t steward-api:local .
+docker run --rm -p 8080:8080 \
+    -e STEWARD_DB_CONNECTIONSTRING="Host=host.docker.internal;Port=55432;Database=steward;Username=steward;Password=steward" \
+    steward-api:local
+curl http://localhost:8080/health
+```
+
+### Migrations
+
+SQL migration scripts live under `src/BitThicket.Steward.Api/Migrations/` and
+are embedded as resources in the API assembly. DbUp runs them in filename
+order on startup and tracks applied scripts in the `schemaversions` journal
+table.
+
+To add a migration, drop a new `NNNN-<description>.sql` file into
+`Migrations/`. The build picks it up via the wildcard `EmbeddedResource`
+glob — no fsproj edit needed.

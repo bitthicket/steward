@@ -3,6 +3,17 @@ namespace BitThicket.Steward.Api.Domain
 open System
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Tenant
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Tenant = {
+    Id: Guid
+    DisplayName: string
+    CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // User
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -11,11 +22,22 @@ open System
 /// auth, profile, and preferences metadata.
 type User = {
     Id: Guid
-    DisplayName: string
     Email: string
     PasswordHash: string
+    DisplayName: string option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserTenantMembership
+// ─────────────────────────────────────────────────────────────────────────────
+
+type UserTenantMembership = {
+    UserId: Guid
+    TenantId: Guid
+    Role: string
+    CreatedAt: DateTimeOffset
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +104,7 @@ type CreditCardInfo = {
 
 type Account = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     Name: string
     AccountType: AccountType
@@ -96,6 +119,9 @@ type Account = {
     /// but the user can override.
     IsOnBudget: bool
     IsActive: bool
+    /// Soft-delete timestamp. When Some the account is logically deleted and
+    /// excluded from list/get results, but transaction history remains intact.
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }
@@ -125,9 +151,11 @@ type TransactionSource =
 /// we link them via MatchedTransactionId.
 type Transaction = {
     Id: Guid
+    TenantId: Guid
     AccountId: Guid
     Amount: Money
     Description: string
+    Merchant: string option
     Memo: string option
     /// Roll-up category when the transaction has no splits. When TransactionSplit
     /// records exist for this transaction, the splits are authoritative for
@@ -135,6 +163,7 @@ type Transaction = {
     CategoryId: Guid option
     Status: TransactionStatus
     Source: TransactionSource
+    ExternalId: string option
     /// Links to the counterpart transaction if matched during reconciliation
     MatchedTransactionId: Guid option
     /// Confidence score in [0.0, 1.0] for the auto-match that produced
@@ -170,6 +199,7 @@ type SplitSource =
 /// to the parent transaction's Amount. See ADR-008.
 type TransactionSplit = {
     Id: Guid
+    TenantId: Guid
     TransactionId: Guid
     Amount: Money
     CategoryId: Guid option
@@ -192,6 +222,7 @@ type AttachmentKind =
 /// See ADR-008.
 type Attachment = {
     Id: Guid
+    TenantId: Guid
     TransactionId: Guid
     SplitId: Guid option
     Kind: AttachmentKind
@@ -216,6 +247,7 @@ type EnrichmentStatus =
 /// See ADR-008.
 type TransactionEnrichment = {
     Id: Guid
+    TenantId: Guid
     TransactionId: Guid
     /// Open-string identifier for the external source (e.g. "amazon", "square").
     SourceKey: string
@@ -236,6 +268,7 @@ type TransactionEnrichment = {
 
 type Category = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     Name: string
     ParentCategoryId: Guid option
@@ -251,6 +284,10 @@ type Category = {
 type BudgetingStyle =
     /// Every dollar is assigned a job; unspent funds stay in the category
     | ZeroBased
+    /// Envelope system: similar to zero-based with stricter envelope semantics
+    | Envelope
+    /// Flexible: allocations may be ≤ income, not required to equal
+    | Flexible
     /// Traditional: set limits, track spending, no envelope semantics
     | TraditionalLimits
 
@@ -263,6 +300,7 @@ type BudgetPeriod =
 
 type BudgetCategory = {
     Id: Guid
+    TenantId: Guid
     BudgetId: Guid
     CategoryId: Guid
     AllocatedAmount: Money
@@ -274,15 +312,45 @@ type BudgetCategory = {
 
 type Budget = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     Name: string
     Style: BudgetingStyle
     Period: BudgetPeriod
     CurrencyCode: string
+    /// Total income to be allocated (zero-based invariant anchor)
+    Income: Money
     IsActive: bool
     StartsOn: DateOnly
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
+}
+
+[<RequireQualifiedAccess>]
+type BudgetPeriodStatus =
+    | Open
+    | Closed
+
+/// A concrete budget period instance (e.g. "April 2026").
+type BudgetPeriodRecord = {
+    Id: Guid
+    BudgetId: Guid
+    TenantId: Guid
+    StartDate: DateOnly
+    EndDate: DateOnly
+    Status: BudgetPeriodStatus
+    CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
+}
+
+/// Per-category allocation within a budget period.
+type BudgetPeriodCategoryAllocation = {
+    BudgetPeriodId: Guid
+    CategoryId: Guid
+    AllocatedAmount: Money
+    OpeningBalance: Money
+    RolloverBalance: Money
+    RolloverEnabled: bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -326,7 +394,7 @@ type ProviderMetadata =
     | Akoya of customerId: string * institutionId: string
     /// Plaid: itemId is per-institution connection; institutionId is Plaid's bank id.
     /// Link Widget handoff.
-    | Plaid of itemId: string * institutionId: string
+    | Plaid of itemId: string * institutionId: string * cursor: string option
     /// MX Atrium: memberGuid identifies the connection; institutionCode names the institution.
     /// Connect Widget handoff.
     | MX of memberGuid: string * institutionCode: string
@@ -348,6 +416,7 @@ type ConnectionStatus =
 
 type DataFeedConnection = {
     Id: Guid
+    TenantId: Guid
     UserId: Guid
     /// Provider identity AND non-secret per-connection state, in one DU value.
     /// Use DataFeedConnection.providerOf to extract the coarse provider tag.
@@ -389,6 +458,7 @@ type SyncStatus =
 
 type SyncEvent = {
     Id: Guid
+    TenantId: Guid
     ConnectionId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
@@ -405,9 +475,9 @@ type FeedHealthLevel =
     | Unknown
 
 /// Coarse, computed projection of feed connection health. See ADR-011.
-/// Placeholder shape — full evaluation rules live with the remediation flow.
 type FeedHealth = {
     ConnectionId: Guid
+    TenantId: Guid
     Level: FeedHealthLevel
     LastSuccessAt: DateTimeOffset option
     LastFailureAt: DateTimeOffset option
@@ -426,6 +496,7 @@ type RemediationOutcome =
 /// or degraded feed connection. See ADR-011.
 type RemediationAttempt = {
     Id: Guid
+    TenantId: Guid
     ConnectionId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
@@ -443,18 +514,19 @@ type RemediationAttempt = {
 
 [<RequireQualifiedAccess>]
 type ReconciliationStatus =
-    | InProgress
+    | Open
     | Completed
-    | Abandoned
+    | Aborted
 
 type Reconciliation = {
     Id: Guid
+    TenantId: Guid
     AccountId: Guid
     StatementBalance: Money
     StatementDate: DateOnly
     Status: ReconciliationStatus
-    MatchedCount: int
-    UnmatchedCount: int
+    Note: string option
+    CreatedByUserId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
 }
@@ -479,6 +551,7 @@ type PaymentType =
 /// is representable.
 type CreditCardPayment = {
     Id: Guid
+    TenantId: Guid
     CreditCardAccountId: Guid
     FundingAccountId: Guid
     Amount: Money
@@ -491,49 +564,35 @@ type CreditCardPayment = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// API Keys
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ApiKey = {
+    Id: Guid
+    TenantId: Guid
+    UserId: Guid
+    DisplayName: string
+    KeyHash: string
+    KeyPrefix: string
+    Role: string
+    Scopes: string list
+    ExpiresAt: DateTimeOffset option
+    LastUsedAt: DateTimeOffset option
+    RevokedAt: DateTimeOffset option
+    CreatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // User Preferences
 // ─────────────────────────────────────────────────────────────────────────────
 
 type UserPreferences = {
     UserId: Guid
+    TenantId: Guid
     DefaultCurrencyCode: string
     DefaultBudgetingStyle: BudgetingStyle
     /// User's desired sync cadence. Bounded by the service layer to
     /// [15 minutes, 24 hours]; values outside that range are clamped.
     /// See ADR-005 for the rationale.
     PreferredSyncFrequency: TimeSpan
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tenant
-// ─────────────────────────────────────────────────────────────────────────────
-
-type Tenant = {
-    Id: Guid
-    OwnerUserId: Guid
-    DisplayName: string
-    DefaultCurrencyCode: string
-    CreatedAt: DateTimeOffset
-    UpdatedAt: DateTimeOffset
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Onboarding
-// ─────────────────────────────────────────────────────────────────────────────
-
-[<RequireQualifiedAccess>]
-type OnboardingStep =
-    | CreateAccount = 1
-    | CreateTenant = 2
-    | ConnectFirstFeed = 3
-    | SetInitialBudget = 4
-    | Done = 5
-
-type OnboardingState = {
-    TenantId: Guid
-    CurrentStep: int
-    StartedAt: DateTimeOffset
-    CompletedAt: DateTimeOffset option
-    CompletedSteps: int list
-    Skipped: bool
 }
