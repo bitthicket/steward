@@ -18,6 +18,7 @@
     <Compile Include="DataFeedConnectionRepository.fs" />
     <Compile Include="SyncEventRepository.fs" />
     <Compile Include="PlaidService.fs" />
+    <Compile Include="AkoyaOAuthService.fs" />
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
     <Compile Include="UserPreferencesRepository.fs" />
@@ -33,6 +34,8 @@
     <Compile Include="McpServer.fs" />
     <Compile Include="PricingWorker.fs" />
     <Compile Include="FeedHealthWorker.fs" />
+    <Compile Include="AkoyaTokenRefreshWorker.fs" />
+    <Compile Include="Logging.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -46,6 +49,8 @@
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.*" />
     <PackageReference Include="FSharp.SystemTextJson" Version="1.*" />
     <PackageReference Include="Npgsql" Version="10.0.1" />
+    <PackageReference Include="Serilog" Version="4.*" />
+    <PackageReference Include="Serilog.AspNetCore" Version="9.*" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
   </ItemGroup>
 </Project>

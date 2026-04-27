@@ -6,6 +6,7 @@ open System.Text.Json
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
 open Falco
 open BitThicket.Steward.Api.Domain
 open BitThicket.Steward.Api.Vault
@@ -385,6 +386,82 @@ module ConnectionEndpoints =
                         do! Response.ofJson (remediationAttemptToResponse u) ctx
         }
 
+    // ── Akoya OAuth endpoints ──────────────────────────────────────────────
+
+    type AkoyaAuthorizeRequest = {
+        institutionId: string
+        redirectUri: string
+    }
+
+    // POST /api/connections/akoya/authorize-url
+    let akoyaAuthorizeUrlHandler : HttpHandler = fun ctx ->
+        task {
+            let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+            let akoya = ctx.RequestServices.GetRequiredService<IAkoyaOAuthService>()
+
+            match accessor.Context with
+            | None ->
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            | Some tc ->
+                let! doc = ConnectionJson.readBody ctx
+                let req = ConnectionJson.deserialize<AkoyaAuthorizeRequest> doc
+
+                if String.IsNullOrWhiteSpace(req.institutionId) then
+                    ctx.Response.StatusCode <- 400
+                    do! Response.ofJson {| error = "institutionId is required" |} ctx
+                elif String.IsNullOrWhiteSpace(req.redirectUri) then
+                    ctx.Response.StatusCode <- 400
+                    do! Response.ofJson {| error = "redirectUri is required" |} ctx
+                else
+                    let! url = akoya.BuildAuthorizeUrlAsync(tc, req.institutionId, req.redirectUri)
+                    do! Response.ofJson {| authorizeUrl = url |} ctx
+        }
+
+    // GET /api/connections/akoya/callback?code=&state=
+    let akoyaCallbackHandler : HttpHandler = fun ctx ->
+        task {
+            let akoya = ctx.RequestServices.GetRequiredService<IAkoyaOAuthService>()
+            let log = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("AkoyaCallback")
+
+            let q = ctx.Request.Query
+            let codeOpt =
+                match q.TryGetValue("code") with
+                | true, v when v.Count > 0 -> Some(v.ToString())
+                | _ -> None
+            let stateOpt =
+                match q.TryGetValue("state") with
+                | true, v when v.Count > 0 -> Some(v.ToString())
+                | _ -> None
+            let errorOpt =
+                match q.TryGetValue("error") with
+                | true, v when v.Count > 0 -> Some(v.ToString())
+                | _ -> None
+
+            match errorOpt with
+            | Some error ->
+                ctx.Response.StatusCode <- 400
+                do! Response.ofJson {| error = $"OAuth error: {error}" |} ctx
+            | None ->
+                match codeOpt, stateOpt with
+                | None, _ ->
+                    ctx.Response.StatusCode <- 400
+                    do! Response.ofJson {| error = "Missing code parameter" |} ctx
+                | _, None ->
+                    ctx.Response.StatusCode <- 400
+                    do! Response.ofJson {| error = "Missing state parameter" |} ctx
+                | Some code, Some state ->
+                    try
+                        let! (connectionId, accountIds) = akoya.HandleCallbackAsync(state, code)
+                        // Redirect to a success page. In production this should be a
+                        // configurable portal URL; for now we return JSON.
+                        do! Response.ofJson {| connectionId = connectionId; accountIds = accountIds; status = "connected" |} ctx
+                    with ex ->
+                        log.LogError(ex, "Akoya callback failed")
+                        ctx.Response.StatusCode <- 400
+                        do! Response.ofJson {| error = $"Callback failed: {ex.Message}" |} ctx
+        }
+
     // ── Plaid-specific helpers ───────────────────────────────────────────────
 
     let private plaidAccountTypeToDomain (plaidType: string) (subtype: string option) : AccountType =
@@ -547,9 +624,13 @@ module ConnectionEndpoints =
                     ctx.Response.StatusCode <- 404
                     do! Response.ofJson {| error = "Connection not found" |} ctx
                 | Some conn ->
-                    // Revoke item via Plaid
-                    let! envelope = vault.LoadAsync(tc, conn.CredentialRef)
-                    let! _ = plaid.RemoveItemAsync envelope.AccessToken
+                    // Provider-specific remote revocation (Plaid only for now)
+                    match DataFeedConnection.providerOf conn.Metadata with
+                    | DataFeedProvider.Plaid ->
+                        let! envelope = vault.LoadAsync(tc, conn.CredentialRef)
+                        let! _ = plaid.RemoveItemAsync envelope.AccessToken
+                        ()
+                    | _ -> ()
 
                     // Delete vault entry
                     let! _ = vault.DeleteAsync(tc, conn.CredentialRef)
@@ -575,6 +656,7 @@ module ConnectionEndpoints =
         task {
             let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
             let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
+            let akoya = ctx.RequestServices.GetRequiredService<IAkoyaOAuthService>()
             let connRepo = ctx.RequestServices.GetRequiredService<IDataFeedConnectionRepository>()
 
             match accessor.Context with
@@ -595,7 +677,10 @@ module ConnectionEndpoints =
                     | DataFeedProvider.Plaid ->
                         let! linkToken = plaid.CreateReauthTokenAsync tc.TenantId connectionId
                         do! Response.ofJson {| linkToken = linkToken |} ctx
+                    | DataFeedProvider.Akoya ->
+                        let! url = akoya.BuildReauthUrlAsync(tc, connectionId)
+                        do! Response.ofJson {| authorizeUrl = url |} ctx
                     | _ ->
                         ctx.Response.StatusCode <- 400
-                        do! Response.ofJson {| error = "Re-auth is only supported for Plaid connections" |} ctx
+                        do! Response.ofJson {| error = "Re-auth is not supported for this provider" |} ctx
         }

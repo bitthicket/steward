@@ -103,7 +103,7 @@ let private buildTestLogger () : Logger * InMemorySink =
     let sink = InMemorySink()
     let logger =
         LoggerConfiguration()
-            .Destructure.With<Program.SecretMaskingPolicy>()
+            .Destructure.With<SecretMaskingPolicy>()
             .WriteTo.Sink(sink)
             .CreateLogger()
     (logger, sink)

@@ -16,6 +16,14 @@ open BitThicket.Steward.Api
 open BitThicket.Steward.Api.Domain
 open BitThicket.Steward.Api.Vault
 open BitThicket.Steward.Pricing
+open Serilog
+
+// ── Serilog setup with secret redaction ──────────────────────────────────────
+let loggerConfig =
+    LoggerConfiguration()
+        .Destructure.With<SecretMaskingPolicy>()
+        .WriteTo.Console()
+        .CreateLogger()
 
 // Run DbUp before the web host starts. A failure here throws and the process
 // exits non-zero so Northflank surfaces a failed deploy rather than booting an
@@ -69,6 +77,8 @@ let version =
     if isNull v then "0.0.0" else v.ToString()
 
 let builder = WebApplication.CreateBuilder()
+builder.Logging.ClearProviders() |> ignore
+builder.Logging.AddSerilog(loggerConfig) |> ignore
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
 
 // ── JSON options ─────────────────────────────────────────────────────────────
@@ -147,8 +157,16 @@ builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let vault = sp.GetRequiredService<IVaultService>()
     let log = sp.GetRequiredService<ILogger<PlaidService>>()
     PlaidService(config, http, factory, vault, log) :> IPlaidService) |> ignore
+builder.Services.AddSingleton<IAkoyaOAuthService>(fun sp ->
+    let config = AkoyaOAuthConfig.fromEnvironment()
+    let http = sp.GetRequiredService<HttpClient>()
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let vault = sp.GetRequiredService<IVaultService>()
+    let log = sp.GetRequiredService<ILogger<AkoyaOAuthService>>()
+    AkoyaOAuthService(config, http, factory, vault, log) :> IAkoyaOAuthService) |> ignore
 builder.Services.AddHostedService<PricingWorker>() |> ignore
 builder.Services.AddHostedService<FeedHealthWorker>() |> ignore
+builder.Services.AddHostedService<AkoyaTokenRefreshWorker>() |> ignore
 
 let wapp = builder.Build()
 
@@ -635,6 +653,8 @@ wapp.UseRouting()
         // Plaid Link
         post "/api/connections/plaid/link-token" (AuthHelpers.requireAuth ConnectionEndpoints.plaidLinkTokenHandler)
         post "/api/connections/plaid/exchange" (AuthHelpers.requireAuth ConnectionEndpoints.plaidExchangeHandler)
+        post "/api/connections/akoya/authorize-url" (AuthHelpers.requireAuth ConnectionEndpoints.akoyaAuthorizeUrlHandler)
+        get "/api/connections/akoya/callback" ConnectionEndpoints.akoyaCallbackHandler
         delete "/api/connections/{connectionId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.deleteConnectionHandler connectionId ctx))
