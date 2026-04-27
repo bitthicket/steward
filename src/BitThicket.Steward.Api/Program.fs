@@ -69,6 +69,11 @@ let akoyaIngestionUrl =
     | null | "" -> None
     | v -> Some v
 
+let plaidIngestionUrl =
+    match Environment.GetEnvironmentVariable("STEWARD_PLAID_INGESTION_URL") with
+    | null | "" -> None
+    | v -> Some v
+
 let serviceToken =
     match Environment.GetEnvironmentVariable("STEWARD_SERVICE_TOKEN") with
     | null | "" -> None
@@ -512,6 +517,58 @@ let internalConnectionStatusHandler : HttpHandler = fun ctx ->
             do! Response.ofJson {| status = "updated"; connectionId = connectionId |} ctx
     }
 
+// GET /internal/connections/{id}/credentials
+// Returns decrypted credentials for the ingestion service. Protected by service token.
+let internalConnectionCredentialsHandler : HttpHandler = fun ctx ->
+    task {
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let vault = ctx.RequestServices.GetRequiredService<IVaultService>()
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let connectionId =
+            match ctx.Request.RouteValues.TryGetValue("connectionId") with
+            | true, v -> v :?> Guid
+            | _ -> Guid.Empty
+
+        if connectionId = Guid.Empty then
+            ctx.Response.StatusCode <- 400
+            do! Response.ofJson {| error = "Invalid connectionId" |} ctx
+        else
+            let! connOpt = connRepo.GetAsync(connectionId)
+            match connOpt with
+            | None ->
+                ctx.Response.StatusCode <- 404
+                do! Response.ofJson {| error = "Connection not found" |} ctx
+            | Some conn ->
+                let tenantContext = { TenantId = conn.TenantId; UserId = conn.UserId }
+                let! envelope = vault.LoadAsync(tenantContext, conn.CredentialRef)
+                let provider =
+                    match DataFeedConnection.providerOf conn.Metadata with
+                    | DataFeedProvider.Plaid -> "plaid"
+                    | DataFeedProvider.Akoya -> "akoya"
+                    | DataFeedProvider.MX -> "mx"
+                    | DataFeedProvider.Yodlee -> "yodlee"
+                    | DataFeedProvider.Intuit -> "intuit"
+                    | DataFeedProvider.Manual -> "manual"
+
+                let metadataJson =
+                    let opts = JsonSerializerOptions()
+                    opts.Converters.Add(System.Text.Json.Serialization.JsonFSharpConverter(System.Text.Json.Serialization.JsonUnionEncoding.NamedFields))
+                    opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+                    JsonSerializer.Serialize(conn.Metadata, opts)
+
+                let envelopeJson =
+                    let opts = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
+                    JsonSerializer.Serialize(envelope, opts)
+
+                let credsResponse = {|
+                    provider = provider
+                    providerMetadata = metadataJson
+                    vaultEnvelope = envelopeJson
+                |}
+                do! Response.ofJson credsResponse ctx
+    }
+
 // POST /internal/sync-trigger
 // Routes to the appropriate ingestion service based on the connection's provider.
 let syncTriggerHandler : HttpHandler = fun ctx ->
@@ -533,9 +590,25 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
         | Some conn ->
             match DataFeedConnection.providerOf conn.Metadata with
             | DataFeedProvider.Plaid ->
-                let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
-                let! result = plaid.SyncConnectionAsync tenantId connectionId
-                do! Response.ofJson result ctx
+                match plaidIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        ctx.Response.StatusCode <- (int)resp.StatusCode
+                        do! Response.ofJson {| error = "Plaid ingestion failed"; detail = body |} ctx
+                    else
+                        do! Response.ofJson {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |} ctx
+                | _ ->
+                    ctx.Response.StatusCode <- 503
+                    do! Response.ofJson {| error = "Plaid ingestion URL or service token not configured" |} ctx
             | DataFeedProvider.Akoya ->
                 match akoyaIngestionUrl, serviceToken with
                 | Some url, Some token ->
@@ -709,6 +782,7 @@ wapp.UseRouting()
         post "/internal/transactions/upsert" internalUpsertHandler
         post "/internal/transactions/remove" internalTransactionsRemoveHandler
         post "/internal/connections/status" internalConnectionStatusHandler
+        get "/internal/connections/{connectionId:guid}/credentials" internalConnectionCredentialsHandler
         post "/internal/sync-trigger" syncTriggerHandler
         post "/webhooks/plaid" plaidWebhookHandler
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
