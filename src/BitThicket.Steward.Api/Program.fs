@@ -428,6 +428,7 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
                       Status = TransactionStatus.Cleared
                       MatchConfidence = None
                       SyncEventId = syncEventIdOpt
+                      DeletedAt = None
                       CreatedAt = now
                       UpdatedAt = now }
 
@@ -657,6 +658,18 @@ wapp.UseRouting()
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Transactions
+        get "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.listTransactionsHandler)
+        get "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.getTransactionHandler txnId ctx))
+        post "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.createTransactionHandler)
+        patch "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.updateTransactionHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.deleteTransactionHandler txnId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->

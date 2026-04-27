@@ -182,6 +182,9 @@ type Transaction = {
     /// Transaction date — when the activity happened from the user's perspective
     /// (e.g. the moment of swipe). This is the date users recall and the UI sorts by.
     OccurredAt: DateTimeOffset
+    /// Soft-delete timestamp. When Some the transaction is logically deleted
+    /// and excluded from list/get results.
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }
