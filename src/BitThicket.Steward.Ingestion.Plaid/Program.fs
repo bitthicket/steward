@@ -334,7 +334,10 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{config.Port}") |> ignore
 builder.Services.AddSingleton<HttpClient>(new HttpClient()) |> ignore
 builder.Services.AddSingleton<IPlaidClient>(fun sp ->
     let http = sp.GetRequiredService<HttpClient>()
-    StubPlaidClient(config, http) :> IPlaidClient) |> ignore
+    if config.UseStub then
+        StubPlaidClient(config, http) :> IPlaidClient
+    else
+        failwith "Real PlaidClient not yet implemented. Set PLAID_USE_STUB=true for testing.") |> ignore
 
 let wapp = builder.Build()
 

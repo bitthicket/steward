@@ -43,10 +43,9 @@ module OnboardingRepository =
             return if hasRow then Some(mapState reader) else None
         }
 
-    let upsertAsync (factory: IDbConnectionFactory) (state: OnboardingState) =
+    let upsertAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (state: OnboardingState) =
         task {
-            let ctx = { TenantId = state.TenantId; UserId = Guid.Empty }
-            use! conn = factory.OpenForTenantAsync(ctx)
+            use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """INSERT INTO tenant_onboarding
@@ -75,10 +74,9 @@ module OnboardingRepository =
             return ()
         }
 
-    let createInitialAsync (factory: IDbConnectionFactory) (tenantId: Guid) =
+    let createInitialAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (tenantId: Guid) =
         task {
-            let ctx = { TenantId = tenantId; UserId = Guid.Empty }
-            use! conn = factory.OpenForTenantAsync(ctx)
+            use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """INSERT INTO tenant_onboarding
@@ -98,6 +96,6 @@ module OnboardingRepository =
 
         { new IOnboardingRepository with
             member _.GetAsync(tenantId) = getAsync factory (requireCtx()) tenantId
-            member _.UpsertAsync(state) = upsertAsync factory state
-            member _.CreateInitialAsync(tenantId) = createInitialAsync factory tenantId
+            member _.UpsertAsync(state) = upsertAsync factory (requireCtx()) state
+            member _.CreateInitialAsync(tenantId) = createInitialAsync factory (requireCtx()) tenantId
         }

@@ -2,8 +2,6 @@
 	import { auth } from '$lib/auth.svelte';
 	import { goto } from '$app/navigation';
 	import { getOnboarding, patchOnboarding, createBudget, listConnections } from '$lib/api';
-	import { onMount } from 'svelte';
-
 	let step = $state(3);
 	let loading = $state(true);
 	let error = $state('');
@@ -19,13 +17,13 @@
 	let budgetName = $state('Monthly Budget');
 	let budgetCurrency = $state('USD');
 
-	onMount(() => {
-		if (!auth.user && !auth.loading) {
-			goto('/login');
-			return;
-		}
-		if (auth.user) {
-			loadOnboarding();
+	$effect(() => {
+		if (!auth.loading) {
+			if (!auth.user) {
+				goto('/login');
+			} else {
+				loadOnboarding();
+			}
 		}
 	});
 
@@ -92,7 +90,7 @@
 		const handler = window.Plaid.create({
 			token: plaidLinkToken,
 			onSuccess: async (publicToken: string, metadata: any) => {
-				await fetch('/api/connections/plaid/exchange', {
+				const res = await fetch('/api/connections/plaid/exchange', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					credentials: 'include',
@@ -102,6 +100,10 @@
 						institutionName: metadata.institution?.name || ''
 					})
 				});
+				if (!res.ok) {
+					error = 'Failed to exchange Plaid token';
+					return;
+				}
 				connectionsCount = 1;
 				await patchOnboarding({ currentStep: 4, completedSteps: [1, 2, 3], skipped: false });
 				step = 4;
@@ -114,7 +116,7 @@
 	async function skipFeed() {
 		submitting = true;
 		try {
-			await patchOnboarding({ currentStep: 4, completedSteps: [1, 2], skipped: true });
+			await patchOnboarding({ currentStep: 4, completedSteps: [1, 2, 3], skipped: true });
 			step = 4;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to skip';
@@ -145,7 +147,7 @@
 	async function skipBudget() {
 		submitting = true;
 		try {
-			await patchOnboarding({ currentStep: 5, completedSteps: [1, 2], skipped: true });
+			await patchOnboarding({ currentStep: 5, completedSteps: [1, 2, 3, 4], skipped: true });
 			step = 5;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to skip';
@@ -182,7 +184,29 @@
 					<div class="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</div>
 				{/if}
 
-				{#if step === 3}
+				{#if step === 1}
+					<h1 class="mb-2 text-2xl font-semibold text-gray-900">Welcome to Steward</h1>
+					<p class="mb-6 text-sm text-gray-600">
+						Let's get your finances organized in a few quick steps.
+					</p>
+					<button
+						onclick={() => step = 2}
+						class="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+					>
+						Get started
+					</button>
+				{:else if step === 2}
+					<h1 class="mb-2 text-2xl font-semibold text-gray-900">Create your first account</h1>
+					<p class="mb-6 text-sm text-gray-600">
+						You can add a manual account now or connect a bank account in the next step.
+					</p>
+					<button
+						onclick={() => step = 3}
+						class="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+					>
+						Continue
+					</button>
+				{:else if step === 3}
 					<h1 class="mb-2 text-2xl font-semibold text-gray-900">Connect your bank</h1>
 					<p class="mb-6 text-sm text-gray-600">
 						Link a bank account to automatically import transactions. You can skip this and add accounts manually later.

@@ -351,7 +351,8 @@ module Auth =
                     ctx.Response.StatusCode <- 409
                     do! Response.ofJson {| error = msg |} ctx
                 | Ok created ->
-                    do! OnboardingRepository.createInitialAsync factory created.TenantId
+                    let onboardingCtx = { TenantId = created.TenantId; UserId = created.UserId }
+                    do! OnboardingRepository.createInitialAsync factory onboardingCtx created.TenantId
                     let token =
                         Jwt.createToken config.JwtSecret config.Issuer config.Audience [
                             "sub", created.UserId.ToString()

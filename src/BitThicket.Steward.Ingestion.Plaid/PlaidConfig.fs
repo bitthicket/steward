@@ -16,6 +16,8 @@ type PlaidConfig = {
     Env: string
     /// Port to bind the HTTP server on.
     Port: string
+    /// Whether to use the stubbed Plaid client instead of real HTTP calls.
+    UseStub: bool
 }
 
 module PlaidConfig =
@@ -37,6 +39,7 @@ module PlaidConfig =
             Secret = require "PLAID_SECRET"
             Env = optional "PLAID_ENV" "sandbox"
             Port = optional "PORT" "8080"
+            UseStub = (optional "PLAID_USE_STUB" "false").ToLowerInvariant() = "true"
         }
 
     /// Derives the Plaid API base URL from the environment flag.
