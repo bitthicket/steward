@@ -327,7 +327,7 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
         let mutable matched = 0
 
         for (externalId, accountId, occurredAt, postedAtOpt, amountMinor, currency, description, merchantOpt) in results do
-            let! existingOpt = repo.GetByExternalIdAsync(externalId)
+            let! existingOpt = repo.GetByExternalIdAsync(externalId, accountId)
             match existingOpt with
             | Some existing ->
                 let now = DateTimeOffset.UtcNow

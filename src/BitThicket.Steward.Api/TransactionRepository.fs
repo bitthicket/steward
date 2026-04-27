@@ -10,7 +10,7 @@ open BitThicket.Steward.Api.Domain
 /// Repository for tenant-scoped transactions.
 type ITransactionRepository =
     abstract GetAsync : id:Guid -> Task<Transaction option>
-    abstract GetByExternalIdAsync : externalId:string -> Task<Transaction option>
+    abstract GetByExternalIdAsync : externalId:string * accountId:Guid -> Task<Transaction option>
     abstract ListByAccountAsync : accountId:Guid -> Task<Transaction list>
     abstract CreateAsync : transaction:Transaction -> Task<Guid>
     abstract UpdateAsync : transaction:Transaction -> Task<unit>
@@ -120,7 +120,7 @@ module TransactionRepository =
             return if hasRow then Some(mapTransaction reader) else None
         }
 
-    let getByExternalIdAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (externalId: string) =
+    let getByExternalIdAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (externalId: string, accountId: Guid) =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
@@ -129,8 +129,9 @@ module TransactionRepository =
                           amount_minor, currency, description, merchant, memo,
                           category_id, source, external_id, matched_transaction_id, transfer_account_id,
                           status, match_confidence, sync_event_id, created_at, updated_at
-                   FROM transactions WHERE external_id = $1"""
+                   FROM transactions WHERE external_id = $1 AND account_id = $2"""
             cmd.Parameters.AddWithValue("$1", externalId) |> ignore
+            cmd.Parameters.AddWithValue("$2", accountId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
             let! hasRow = reader.ReadAsync()
@@ -363,7 +364,7 @@ module TransactionRepository =
 
         { new ITransactionRepository with
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
-            member _.GetByExternalIdAsync(externalId) = getByExternalIdAsync factory (requireCtx()) externalId
+            member _.GetByExternalIdAsync(externalId, accountId) = getByExternalIdAsync factory (requireCtx()) (externalId, accountId)
             member _.ListByAccountAsync(accountId) = listByAccountAsync factory (requireCtx()) accountId
             member _.CreateAsync(txn) = createAsync factory txn
             member _.UpdateAsync(txn) = updateAsync factory txn

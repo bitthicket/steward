@@ -109,8 +109,8 @@ module AccountRepository =
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, name, account_type, currency,
                           institution_name, external_id, credit_card_info,
-                          is_on_budget, is_active, created_at, updated_at
-                   FROM accounts WHERE external_id = $1"""
+                          is_on_budget, is_active, deleted_at, created_at, updated_at
+                   FROM accounts WHERE external_id = $1 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", externalId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
