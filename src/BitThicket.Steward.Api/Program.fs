@@ -161,6 +161,10 @@ builder.Services.AddScoped<IUserPreferencesRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     UserPreferencesRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IOnboardingRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    OnboardingRepository.create factory accessor) |> ignore
 builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let config = PlaidConfig.fromEnvironment()
     let http = sp.GetRequiredService<HttpClient>()
@@ -345,6 +349,72 @@ let resolveHandler : HttpHandler = fun ctx ->
             | _ ->
                 ctx.Response.StatusCode <- 400
                 do! Response.ofJson {| error = "Invalid action; expected 'accept' or 'reject'" |} ctx
+    }
+
+// GET /api/onboarding
+let getOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        match accessor.Context with
+        | None ->
+            ctx.Response.StatusCode <- 401
+            do! Response.ofJson {| error = "Unauthorized" |} ctx
+        | Some tc ->
+            let! stateOpt = repo.GetAsync(tc.TenantId)
+            match stateOpt with
+            | None ->
+                ctx.Response.StatusCode <- 404
+                do! Response.ofJson {| error = "Onboarding state not found" |} ctx
+            | Some state ->
+                let respJson =
+                    let n = System.Text.Json.Nodes.JsonObject()
+                    n["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(state.TenantId.ToString())
+                    n["currentStep"] <- System.Text.Json.Nodes.JsonValue.Create(state.CurrentStep)
+                    n["startedAt"] <- System.Text.Json.Nodes.JsonValue.Create(state.StartedAt.ToString("O"))
+                    match state.CompletedAt with
+                    | Some dt -> n["completedAt"] <- System.Text.Json.Nodes.JsonValue.Create(dt.ToString("O"))
+                    | None -> n["completedAt"] <- null
+                    let arr = System.Text.Json.Nodes.JsonArray()
+                    for i in state.CompletedSteps do arr.Add(System.Text.Json.Nodes.JsonValue.Create(i))
+                    n["completedSteps"] <- arr
+                    n["skipped"] <- System.Text.Json.Nodes.JsonValue.Create(state.Skipped)
+                    n
+                do! Response.ofJson respJson ctx
+    }
+
+// PATCH /api/onboarding
+let patchOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let currentStep = root.GetProperty("currentStep").GetInt32()
+        let skipped =
+            match root.TryGetProperty("skipped") with
+            | true, el when el.ValueKind = JsonValueKind.True -> true
+            | _ -> false
+        let completedSteps =
+            match root.TryGetProperty("completedSteps") with
+            | true, el when el.ValueKind = JsonValueKind.Array ->
+                el.EnumerateArray() |> Seq.map (fun e -> e.GetInt32()) |> Seq.toList
+            | _ -> []
+        match accessor.Context with
+        | None ->
+            ctx.Response.StatusCode <- 401
+            do! Response.ofJson {| error = "Unauthorized" |} ctx
+        | Some tc ->
+            let state = {
+                TenantId = tc.TenantId
+                CurrentStep = currentStep
+                StartedAt = DateTimeOffset.UtcNow
+                CompletedAt = if currentStep >= 5 then Some DateTimeOffset.UtcNow else None
+                CompletedSteps = completedSteps
+                Skipped = skipped
+            }
+            do! repo.UpsertAsync(state)
+            do! Response.ofJson {| status = "updated" |} ctx
     }
 
 // POST /internal/transactions/upsert
@@ -789,6 +859,9 @@ wapp.UseRouting()
             BudgetEndpoints.getCurrentReportHandler budgetId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
+        // Onboarding
+        get "/api/onboarding" (AuthHelpers.requireAuth getOnboardingHandler)
+        patch "/api/onboarding" (AuthHelpers.requireAuth patchOnboardingHandler)
         // Reconciliations
         post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
         get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->

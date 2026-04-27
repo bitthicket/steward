@@ -596,3 +596,24 @@ type UserPreferences = {
     /// See ADR-005 for the rationale.
     PreferredSyncFrequency: TimeSpan
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding
+// ─────────────────────────────────────────────────────────────────────────────
+
+[<RequireQualifiedAccess>]
+type OnboardingStep =
+    | CreateAccount = 1
+    | CreateTenant = 2
+    | ConnectFirstFeed = 3
+    | SetInitialBudget = 4
+    | Done = 5
+
+type OnboardingState = {
+    TenantId: Guid
+    CurrentStep: int
+    StartedAt: DateTimeOffset
+    CompletedAt: DateTimeOffset option
+    CompletedSteps: int list
+    Skipped: bool
+}

@@ -23,6 +23,7 @@
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
     <Compile Include="UserPreferencesRepository.fs" />
+    <Compile Include="OnboardingRepository.fs" />
     <Compile Include="ApiKeyRepository.fs" />
     <Compile Include="FeedHealthRepository.fs" />
     <Compile Include="RemediationAttemptRepository.fs" />

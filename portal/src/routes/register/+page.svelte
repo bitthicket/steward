@@ -23,7 +23,7 @@
 			});
 			await setCookie(result.accessToken);
 			await auth.refresh();
-			goto('/portal');
+			goto('/welcome');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Registration failed';
 		} finally {
