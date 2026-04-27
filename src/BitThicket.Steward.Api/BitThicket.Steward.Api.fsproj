@@ -21,6 +21,7 @@
     <Compile Include="TransactionEndpoints.fs" />
     <Compile Include="ReconciliationRepository.fs" />
     <Compile Include="VaultService.fs" />
+    <Compile Include="EventBus.fs" />
     <Compile Include="DataFeedConnectionRepository.fs" />
     <Compile Include="SyncEventRepository.fs" />
     <Compile Include="PlaidService.fs" />
@@ -44,6 +45,7 @@
     <Compile Include="PricingWorker.fs" />
     <Compile Include="FeedHealthWorker.fs" />
     <Compile Include="AkoyaTokenRefreshWorker.fs" />
+    <Compile Include="SyncCoordinator.fs" />
     <Compile Include="Logging.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

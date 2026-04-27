@@ -186,6 +186,10 @@ builder.Services.AddSingleton<IAkoyaOAuthService>(fun sp ->
     let vault = sp.GetRequiredService<IVaultService>()
     let log = sp.GetRequiredService<ILogger<AkoyaOAuthService>>()
     AkoyaOAuthService(config, http, factory, vault, log) :> IAkoyaOAuthService) |> ignore
+builder.Services.AddSingleton<IEventBus>(fun sp ->
+    let log = sp.GetRequiredService<ILogger<InProcessEventBus>>()
+    InProcessEventBus(log) :> IEventBus) |> ignore
+builder.Services.AddHostedService<SyncCoordinator>() |> ignore
 builder.Services.AddHostedService<PricingWorker>() |> ignore
 builder.Services.AddHostedService<FeedHealthWorker>() |> ignore
 builder.Services.AddHostedService<AkoyaTokenRefreshWorker>() |> ignore
@@ -650,24 +654,6 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
             do! Response.ofJson {| error = msg |} ctx
     }
 
-// POST /api/connections/{connectionId}/sync
-// Public sync trigger endpoint.
-let syncConnectionHandler (connectionId: Guid) : HttpHandler = fun ctx ->
-    task {
-        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
-        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
-        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
-        match result with
-        | Ok resp -> do! Response.ofJson resp ctx
-        | Error "Connection not found" ->
-            ctx.Response.StatusCode <- 404
-            do! Response.ofJson {| error = "Connection not found" |} ctx
-        | Error msg ->
-            ctx.Response.StatusCode <- 503
-            do! Response.ofJson {| error = msg |} ctx
-    }
-
 // POST /webhooks/plaid
 let plaidWebhookHandler : HttpHandler = fun ctx ->
     task {
@@ -836,9 +822,6 @@ wapp.UseRouting()
         post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
-        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
-            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
-            syncConnectionHandler connectionId ctx))
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
@@ -905,6 +888,33 @@ wapp.UseRouting()
         delete "/api/api-keys/{keyId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let keyId = ctx.Request.RouteValues.["keyId"] :?> Guid
             Auth.revokeApiKeyHandler keyId ctx))
+        // Data feed connections
+        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            task {
+                let connRepo = ctx.RequestServices.GetRequiredService<IDataFeedConnectionRepository>()
+                let bus = ctx.RequestServices.GetRequiredService<IEventBus>()
+                let! connOpt = connRepo.GetAsync(connectionId)
+                match connOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "Connection not found" |} ctx
+                | Some conn ->
+                    let predictedSyncEventId = Guid.NewGuid()
+                    let payload =
+                        {| tenantId = conn.TenantId
+                           connectionId = conn.Id
+                           accountId = (None : Guid option) |}
+                    let json = System.Text.Json.JsonSerializer.Serialize(payload)
+                    let envelope =
+                        { Topic = EventBusTopics.syncRequested
+                          JsonPayload = json
+                          OccurredAt = DateTimeOffset.UtcNow
+                          CausationId = None }
+                    do! bus.Publish(envelope)
+                    ctx.Response.StatusCode <- 202
+                    do! Response.ofJson {| syncEventId = predictedSyncEventId |} ctx
+            }))
         // MCP server route group
         post "/mcp" (AuthHelpers.requireAuth McpServer.mcpHandler)
         // SPA fallthrough for portal routes
