@@ -10,6 +10,7 @@ open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Diagnostics.HealthChecks
 open Microsoft.Extensions.Logging
 open Npgsql
 open BitThicket.Steward.Api
@@ -19,11 +20,7 @@ open BitThicket.Steward.Pricing
 open Serilog
 
 // ── Serilog setup with secret redaction ──────────────────────────────────────
-let loggerConfig =
-    LoggerConfiguration()
-        .Destructure.With<SecretMaskingPolicy>()
-        .WriteTo.Console()
-        .CreateLogger()
+let loggerConfig = Observability.createLoggerConfig().CreateLogger()
 
 // Run DbUp before the web host starts. A failure here throws and the process
 // exits non-zero so Northflank surfaces a failed deploy rather than booting an
@@ -93,6 +90,11 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(fun (opts: Micr
 
 let dataSource = NpgsqlDataSource.Create(connectionString)
 builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
+
+// ── Observability ────────────────────────────────────────────────────────────
+Observability.registerMetrics builder.Services "steward-api" version
+HealthChecks.register builder.Services dataSource
+
 TenantContextServices.register builder.Services |> ignore
 AuthServices.register builder.Services { JwtSecret = jwtSecret; JwtSecretPrevious = jwtSecretPrevious; Issuer = jwtIssuer; Audience = jwtAudience } |> ignore
 builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
@@ -223,6 +225,26 @@ let makeManualAccessor (tenantId: Guid) : ITenantContextAccessor =
         member _.Context = Some { TenantId = tenantId; UserId = Guid.Empty } }
 
 // ── Route handlers ─────────────────────────────────────────────────────────────
+
+// GET /health
+let healthHandler : HttpHandler = fun ctx ->
+    task {
+        let health = ctx.RequestServices.GetRequiredService<HealthCheckService>()
+        let! report = health.CheckHealthAsync()
+        let statusCode =
+            match report.Status with
+            | HealthStatus.Healthy | HealthStatus.Degraded -> 200
+            | _ -> 503
+        ctx.Response.StatusCode <- statusCode
+        let checks =
+            report.Entries
+            |> Seq.map (fun kvp ->
+                kvp.Key,
+                {| status = kvp.Value.Status.ToString()
+                   description = kvp.Value.Description |})
+            |> dict
+        do! Response.ofJson {| status = report.Status.ToString(); version = version; checks = checks |} ctx
+    }
 
 // GET /api/prices?base=BTC&quote=USD[&asOf=<ISO8601>]
 // Returns spot price when asOf is omitted; historical price for a specific date otherwise.
@@ -619,11 +641,13 @@ let plaidWebhookHandler : HttpHandler = fun ctx ->
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
+Observability.useMetrics wapp
+wapp.UseRouting() |> ignore
+Observability.useRequestLogging wapp
 
-wapp.UseRouting()
-    .UseFalco([
+wapp.UseFalco([
         get "/" (Response.ofPlainText "Hello World!")
-        get "/health" (Response.ofJson {| status = "ok"; version = version |})
+        get "/health" healthHandler
         post "/auth/register" Auth.registerHandler
         post "/auth/login" Auth.loginHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)

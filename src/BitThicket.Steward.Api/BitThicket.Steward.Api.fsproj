@@ -38,6 +38,8 @@
     <Compile Include="FeedHealthWorker.fs" />
     <Compile Include="AkoyaTokenRefreshWorker.fs" />
     <Compile Include="Logging.fs" />
+    <Compile Include="Observability.fs" />
+    <Compile Include="HealthChecks.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -53,6 +55,12 @@
     <PackageReference Include="Npgsql" Version="10.0.1" />
     <PackageReference Include="Serilog" Version="4.*" />
     <PackageReference Include="Serilog.AspNetCore" Version="9.*" />
+    <PackageReference Include="Serilog.Formatting.Compact" Version="3.*" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.15.3-beta.1" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
   </ItemGroup>
 </Project>
