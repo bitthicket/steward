@@ -281,6 +281,10 @@ type Category = {
 type BudgetingStyle =
     /// Every dollar is assigned a job; unspent funds stay in the category
     | ZeroBased
+    /// Envelope system: similar to zero-based with stricter envelope semantics
+    | Envelope
+    /// Flexible: allocations may be ≤ income, not required to equal
+    | Flexible
     /// Traditional: set limits, track spending, no envelope semantics
     | TraditionalLimits
 
@@ -311,10 +315,39 @@ type Budget = {
     Style: BudgetingStyle
     Period: BudgetPeriod
     CurrencyCode: string
+    /// Total income to be allocated (zero-based invariant anchor)
+    Income: Money
     IsActive: bool
     StartsOn: DateOnly
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
+}
+
+[<RequireQualifiedAccess>]
+type BudgetPeriodStatus =
+    | Open
+    | Closed
+
+/// A concrete budget period instance (e.g. "April 2026").
+type BudgetPeriodRecord = {
+    Id: Guid
+    BudgetId: Guid
+    TenantId: Guid
+    StartDate: DateOnly
+    EndDate: DateOnly
+    Status: BudgetPeriodStatus
+    CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
+}
+
+/// Per-category allocation within a budget period.
+type BudgetPeriodCategoryAllocation = {
+    BudgetPeriodId: Guid
+    CategoryId: Guid
+    AllocatedAmount: Money
+    OpeningBalance: Money
+    RolloverBalance: Money
+    RolloverEnabled: bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

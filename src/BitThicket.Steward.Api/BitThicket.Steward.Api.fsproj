@@ -16,8 +16,11 @@
     <Compile Include="VaultService.fs" />
     <Compile Include="DataFeedConnectionRepository.fs" />
     <Compile Include="PlaidService.fs" />
-    <Compile Include="Auth.fs" />
+    <Compile Include="BudgetRepository.fs" />
+    <Compile Include="BudgetPeriodRepository.fs" />
     <Compile Include="Pricing.fs" />
+    <Compile Include="BudgetEndpoints.fs" />
+    <Compile Include="Auth.fs" />
     <Compile Include="PricingWorker.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
