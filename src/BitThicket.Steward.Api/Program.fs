@@ -658,6 +658,18 @@ wapp.UseRouting()
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Categories
+        get "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.listCategoriesHandler)
+        get "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.getCategoryHandler categoryId ctx))
+        post "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.createCategoryHandler)
+        patch "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.updateCategoryHandler categoryId ctx))
+        delete "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.deleteCategoryHandler categoryId ctx))
         // Transactions
         get "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.listTransactionsHandler)
         get "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->

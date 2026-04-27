@@ -276,7 +276,11 @@ type Category = {
     Name: string
     ParentCategoryId: Guid option
     IsSystem: bool
+    CurrencyCode: string
+    RolloverEnabled: bool
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
