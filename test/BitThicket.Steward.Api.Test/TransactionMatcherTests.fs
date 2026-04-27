@@ -442,8 +442,8 @@ type IntegrationTests() =
             let txnWithExt = { txn with ExternalId = Some "ext-unique-123" }
             let! _ = repo.CreateAsync(txnWithExt)
 
-            let! found = repo.GetByExternalIdAsync("ext-unique-123")
-            let! notFound = repo.GetByExternalIdAsync("ext-does-not-exist")
+            let! found = repo.GetByExternalIdAsync("ext-unique-123", accountId)
+            let! notFound = repo.GetByExternalIdAsync("ext-does-not-exist", accountId)
 
             test <@ found |> Option.isSome @>
             test <@ found.Value.Id = txn.Id @>

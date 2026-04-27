@@ -193,6 +193,27 @@ module AuthHelpers =
                 ctx.Response.StatusCode <- 403
                 Response.ofJson {| error = "Forbidden" |} ctx
 
+    /// Wrap a handler so that it returns 401 when unauthenticated and 403 when
+    /// the authenticated API key does not have the required scope.
+    /// JWT-authenticated requests are allowed through (scopes are API-key only for now).
+    let requireScope (requiredScope: string) (handler: HttpHandler) : HttpHandler = fun ctx ->
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        match accessor.Context with
+        | None ->
+            ctx.Response.StatusCode <- 401
+            Response.ofJson {| error = "Unauthorized" |} ctx
+        | Some _ ->
+            // If authenticated via API key, check scopes
+            match ctx.Items.TryGetValue("ApiKeyScopes") with
+            | true, value ->
+                match Microsoft.FSharp.Core.Operators.tryUnbox<string list> value with
+                | Some scopes when scopes |> List.contains requiredScope -> handler ctx
+                | _ ->
+                    ctx.Response.StatusCode <- 403
+                    Response.ofJson {| error = "Forbidden: missing required scope" |} ctx
+            // JWT auth has no scopes yet — allow through if endpoint is otherwise protected
+            | false, _ -> handler ctx
+
 // ── TenantContextMiddleware ──────────────────────────────────────────────────
 
 /// ASP.NET Core middleware that extracts the Bearer token from the
@@ -243,6 +264,7 @@ type TenantContextMiddleware(next: RequestDelegate, authConfig: AuthConfig, dbFa
                         ctx.Items["TenantContext"] <- tc
                         ctx.Items["TenantRole"] <- keyRecord.Role
                         ctx.Items["ApiKeyId"] <- keyRecord.Id
+                        ctx.Items["ApiKeyScopes"] <- keyRecord.Scopes
                         // Fire-and-forget update last_used_at
                         do! ApiKeyRepository.updateLastUsedAsync dbFactory tc keyRecord.Id
                     | None -> ()

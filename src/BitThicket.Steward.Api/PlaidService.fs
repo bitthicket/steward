@@ -240,7 +240,7 @@ type PlaidService(
                 | None ->
                     logger.LogWarning("Skipping Plaid transaction {ExternalId}: no Steward account mapped for Plaid account {PlaidAccountId}", t.externalId, t.accountId)
                 | Some account ->
-                    let! existingOpt = txnRepo.GetByExternalIdAsync(t.externalId)
+                    let! existingOpt = txnRepo.GetByExternalIdAsync(t.externalId, account.Id)
                     let occurredAt = DateTimeOffset.Parse(t.date)
                     let postedAtOpt = t.authorizedDate |> Option.map DateTimeOffset.Parse
                     let amountMinor = int64 (-t.amount * 100m)
