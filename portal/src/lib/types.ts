@@ -184,5 +184,6 @@ export interface Reconciliation {
 
 export interface ReconciliationWithTransactions extends Reconciliation {
 	includedTransactions: Transaction[];
+	candidateTransactions: Transaction[];
 	diffMinor: number;
 }

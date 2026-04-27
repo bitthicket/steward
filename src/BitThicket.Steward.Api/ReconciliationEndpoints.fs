@@ -48,6 +48,7 @@ type ReconciliationWithTransactionsResponse = {
     startedAt: DateTimeOffset
     completedAt: DateTimeOffset option
     includedTransactions: Transaction list
+    candidateTransactions: Transaction list
     diffMinor: int64
 }
 
@@ -169,6 +170,7 @@ module ReconciliationEndpoints =
                 ctx.Response.StatusCode <- 404
                 do! Response.ofJson {| error = "Reconciliation not found" |} ctx
             | Some (recon, txns) ->
+                let! candidates = repo.ListCandidateTransactionsAsync(recon.AccountId, recon.StatementDate)
                 let diffMinor = computeDiffMinor recon txns
                 let resp = {
                     id = recon.Id
@@ -182,6 +184,7 @@ module ReconciliationEndpoints =
                     startedAt = recon.StartedAt
                     completedAt = recon.CompletedAt
                     includedTransactions = txns
+                    candidateTransactions = candidates
                     diffMinor = diffMinor
                 }
                 do! Response.ofJson resp ctx

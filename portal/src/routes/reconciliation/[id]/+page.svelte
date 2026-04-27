@@ -10,7 +10,7 @@
 		listAccounts
 	} from '$lib/api';
 	import MoneyDisplay from '$lib/MoneyDisplay.svelte';
-	import type { ReconciliationWithTransactions, Account } from '$lib/types';
+	import type { ReconciliationWithTransactions, Account, Transaction } from '$lib/types';
 
 	$effect(() => {
 		if (!auth.user && !auth.loading) {
@@ -35,6 +35,21 @@
 		}
 	});
 
+	function mergeTransactions(included: Transaction[], candidates: Transaction[]): Transaction[] {
+		const map = new Map<string, Transaction>();
+		for (const t of included) map.set(t.id, t);
+		for (const t of candidates) map.set(t.id, t);
+		return Array.from(map.values()).sort((a, b) => {
+			const aDate = a.postedAt || a.occurredAt;
+			const bDate = b.postedAt || b.occurredAt;
+			return new Date(bDate).getTime() - new Date(aDate).getTime();
+		});
+	}
+
+	const displayTransactions = $derived(
+		!recon ? [] : mergeTransactions(recon.includedTransactions, recon.candidateTransactions)
+	);
+
 	async function loadRecon() {
 		loading = true;
 		error = null;
@@ -57,15 +72,9 @@
 			const included = checked ? [txnId] : [];
 			const excluded = checked ? [] : [txnId];
 			await updateReconciliationTransactions(reconId, { included, excluded });
-			if (checked) {
-				includedIds.add(txnId);
-			} else {
-				includedIds.delete(txnId);
-			}
-			includedIds = new Set(includedIds);
-			// Refresh diff
 			const updated = await getReconciliation(reconId);
-			recon = { ...recon, diffMinor: updated.diffMinor };
+			recon = updated;
+			includedIds = new Set(updated.includedTransactions.map((t) => t.id));
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Failed to update');
 		} finally {
@@ -196,41 +205,43 @@
 			{/if}
 
 			<div class="divide-y divide-gray-100 rounded-xl bg-white shadow-sm ring-1 ring-gray-100">
-				{#each recon.includedTransactions as txn}
-					<div class="flex items-center gap-4 p-4">
-						{#if recon.status === 'open'}
-							<input
-								type="checkbox"
-								checked={includedIds.has(txn.id)}
-								onchange={(e) => toggleTransaction(txn.id, e.currentTarget.checked)}
-								class="h-4 w-4 rounded border-gray-300 text-blue-600"
-							/>
-						{:else}
-							<span class="text-green-600">✓</span>
-						{/if}
-						<div class="flex-1">
-							<p class="text-sm font-medium text-gray-900">{txn.description}</p>
-							<p class="text-xs text-gray-500">
-								{formatDate(txn.occurredAt)}
-								{#if txn.postedAt}
-									· Posted {formatDate(txn.postedAt)}
-								{/if}
-								{#if txn.merchant}
-									· {txn.merchant}
-								{/if}
-							</p>
-						</div>
-						<span
-							class="text-sm font-medium {txn.amount.amount < 0 ? 'text-red-600' : 'text-green-600'}"
-						>
-							<MoneyDisplay amount={txn.amount.amount} currency={txn.amount.currencyCode} />
-						</span>
+				{#if displayTransactions.length === 0}
+					<div class="p-8 text-center text-gray-500">
+						<p>No candidate transactions.</p>
 					</div>
 				{:else}
-					<div class="p-8 text-center text-gray-500">
-						<p>No transactions included.</p>
-					</div>
-				{/each}
+					{#each displayTransactions as txn}
+						<div class="flex items-center gap-4 p-4">
+							{#if recon.status === 'open'}
+								<input
+									type="checkbox"
+									checked={includedIds.has(txn.id)}
+									onchange={(e) => toggleTransaction(txn.id, e.currentTarget.checked)}
+									class="h-4 w-4 rounded border-gray-300 text-blue-600"
+								/>
+							{:else}
+								<span class="text-green-600">✓</span>
+							{/if}
+							<div class="flex-1">
+								<p class="text-sm font-medium text-gray-900">{txn.description}</p>
+								<p class="text-xs text-gray-500">
+									{formatDate(txn.occurredAt)}
+									{#if txn.postedAt}
+										· Posted {formatDate(txn.postedAt)}
+									{/if}
+									{#if txn.merchant}
+										· {txn.merchant}
+									{/if}
+								</p>
+							</div>
+							<span
+								class="text-sm font-medium {txn.amount.amount < 0 ? 'text-red-600' : 'text-green-600'}"
+							>
+								<MoneyDisplay amount={txn.amount.amount} currency={txn.amount.currencyCode} />
+							</span>
+						</div>
+					{/each}
+				{/if}
 			</div>
 		{/if}
 	</div>
