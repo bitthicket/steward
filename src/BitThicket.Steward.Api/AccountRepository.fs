@@ -10,6 +10,7 @@ open BitThicket.Steward.Api.Domain
 /// Repository for tenant-scoped accounts.
 type IAccountRepository =
     abstract GetAsync : id:Guid -> Task<Account option>
+    abstract GetByExternalIdAsync : externalId:string -> Task<Account option>
     abstract ListAsync : unit -> Task<Account list>
     abstract CreateAsync : account:Account -> Task<Guid>
     abstract UpdateAsync : account:Account -> Task<unit>
@@ -95,6 +96,22 @@ module AccountRepository =
                           is_on_budget, is_active, deleted_at, created_at, updated_at
                    FROM accounts WHERE id = $1 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let! hasRow = reader.ReadAsync()
+            return if hasRow then Some(mapAccount reader) else None
+        }
+
+    let getByExternalIdAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (externalId: string) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, user_id, name, account_type, currency,
+                          institution_name, external_id, credit_card_info,
+                          is_on_budget, is_active, created_at, updated_at
+                   FROM accounts WHERE external_id = $1"""
+            cmd.Parameters.AddWithValue("$1", externalId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
             let! hasRow = reader.ReadAsync()
@@ -227,6 +244,7 @@ module AccountRepository =
 
         { new IAccountRepository with
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
+            member _.GetByExternalIdAsync(externalId) = getByExternalIdAsync factory (requireCtx()) externalId
             member _.ListAsync() = listAsync factory (requireCtx())
             member _.CreateAsync(account) = createAsync factory account
             member _.UpdateAsync(account) = updateAsync factory account

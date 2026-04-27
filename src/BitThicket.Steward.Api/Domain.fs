@@ -394,7 +394,7 @@ type ProviderMetadata =
     | Akoya of customerId: string * institutionId: string
     /// Plaid: itemId is per-institution connection; institutionId is Plaid's bank id.
     /// Link Widget handoff.
-    | Plaid of itemId: string * institutionId: string
+    | Plaid of itemId: string * institutionId: string * cursor: string option
     /// MX Atrium: memberGuid identifies the connection; institutionCode names the institution.
     /// Connect Widget handoff.
     | MX of memberGuid: string * institutionCode: string

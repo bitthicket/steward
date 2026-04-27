@@ -12,6 +12,10 @@
     <Compile Include="AccountRepository.fs" />
     <Compile Include="CategoryRepository.fs" />
     <Compile Include="TransactionRepository.fs" />
+    <Compile Include="TransactionMatcher.fs" />
+    <Compile Include="VaultService.fs" />
+    <Compile Include="DataFeedConnectionRepository.fs" />
+    <Compile Include="PlaidService.fs" />
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
     <Compile Include="ApiKeyRepository.fs" />

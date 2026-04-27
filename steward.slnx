@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/BitThicket.Steward.Api/BitThicket.Steward.Api.fsproj" />
+    <Project Path="src/BitThicket.Steward.Ingestion.Akoya/BitThicket.Steward.Ingestion.Akoya.fsproj" />
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/BitThicket.Steward.Api.Test/BitThicket.Steward.Api.Test.fsproj" />

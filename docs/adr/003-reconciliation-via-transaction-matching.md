@@ -26,6 +26,15 @@ Each candidate match produces a confidence score in `[0.0, 1.0]`, which is store
 - `lowAcceptThreshold <= confidence < autoAcceptThreshold` (default `0.6`) — link the records but mark the transaction `NeedsReview`. The transaction lands in a review queue for the user (or an agent acting on the user's behalf) to confirm or reject.
 - `confidence < lowAcceptThreshold` — do not auto-link. The feed transaction is created standalone and the manual entry remains untouched.
 
+### Tuning knobs
+
+Threshold values are settable at runtime via environment variables so operators can adapt to data-quality patterns without redeploying:
+
+- `STEWARD_MATCH_AUTO_THRESHOLD` — decimal in `[0.0, 1.0]`, default `0.9`. Matches at or above this score are auto-accepted.
+- `STEWARD_MATCH_REVIEW_THRESHOLD` — decimal in `[0.0, 1.0]`, default `0.6`. Matches between this score and the auto threshold are flagged for review.
+
+Invalid or missing values fall back to the defaults. The scoring weights themselves (amount 0.4, date 0.3, description 0.3) are compile-time constants; changing them requires a code change.
+
 Matched pairs are linked via `Transaction.MatchedTransactionId` (bidirectional). For auto-accepted matches the manual entry is promoted to `Cleared` status; the feed entry is discarded or merged. The match operation also copies `PostedAt` from the feed transaction onto the matched record so future statement reconciliation has the institution's posting date. Statement-level reconciliation (step 2 below) is what promotes a transaction from `Cleared` to `Reconciled`.
 
 ### 2. Manual reconciliation (user-initiated)
