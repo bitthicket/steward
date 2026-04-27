@@ -71,6 +71,14 @@ let version =
 let builder = WebApplication.CreateBuilder()
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
 
+// ── JSON options ─────────────────────────────────────────────────────────────
+builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(fun (opts: Microsoft.AspNetCore.Http.Json.JsonOptions) ->
+    opts.SerializerOptions.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+    opts.SerializerOptions.Converters.Add(MoneyConverter())) |> ignore
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(fun (opts: Microsoft.AspNetCore.Mvc.JsonOptions) ->
+    opts.JsonSerializerOptions.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+    opts.JsonSerializerOptions.Converters.Add(MoneyConverter())) |> ignore
+
 // ── Services ──────────────────────────────────────────────────────────────────
 
 let dataSource = NpgsqlDataSource.Create(connectionString)
@@ -128,6 +136,10 @@ builder.Services.AddScoped<IRemediationAttemptRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     RemediationAttemptRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IUserPreferencesRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    UserPreferencesRepository.create factory accessor) |> ignore
 builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let config = PlaidConfig.fromEnvironment()
     let http = sp.GetRequiredService<HttpClient>()
@@ -603,6 +615,9 @@ wapp.UseRouting()
         patch "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.updateAccountHandler accountId ctx))
+        get "/api/accounts/{accountId:guid}/balance" (AuthHelpers.requireAuth (fun ctx ->
+            let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
+            AccountEndpoints.getBalanceHandler accountId ctx))
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
@@ -644,6 +659,15 @@ wapp.UseRouting()
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
             BudgetEndpoints.closePeriodHandler budgetId periodId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/{periodId:guid}/report" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            BudgetEndpoints.getReportHandler budgetId periodId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            BudgetEndpoints.getCurrentReportHandler budgetId ctx))
+        get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
+        patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
         // API key management

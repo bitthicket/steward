@@ -8,6 +8,7 @@ open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
 open Falco
 open BitThicket.Steward.Api.Domain
+open BitThicket.Steward.Pricing
 
 // ── Request / response DTOs ────────────────────────────────────────────────
 
@@ -36,6 +37,14 @@ type AccountResponse = {
     isActive: bool
     createdAt: DateTimeOffset
     updatedAt: DateTimeOffset
+}
+
+type BalanceResponse = {
+    posted: Money
+    available: Money
+    pending: Money
+    displayCurrency: string option
+    converted: {| posted: Money; available: Money; pending: Money |} option
 }
 
 // ── JSON helpers ───────────────────────────────────────────────────────────
@@ -194,6 +203,44 @@ module AccountEndpoints =
                     }
                     do! repo.UpdateAsync(updated)
                     do! Response.ofJson (accountToResponse updated) ctx
+        }
+
+    // GET /api/accounts/{accountId:guid}/balance?displayCurrency=USD|BTC
+    let getBalanceHandler (accountId: Guid) : HttpHandler = fun ctx ->
+        task {
+            let repo = ctx.RequestServices.GetRequiredService<IAccountRepository>()
+            let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+
+            let displayCurrencyOpt =
+                match ctx.Request.Query.TryGetValue("displayCurrency") with
+                | true, v when v.Count > 0 -> Some(v.ToString().ToUpperInvariant())
+                | _ -> None
+
+            let! balanceOpt = repo.GetBalanceAsync(accountId)
+            match balanceOpt with
+            | None ->
+                ctx.Response.StatusCode <- 404
+                do! Response.ofJson {| error = "Account not found" |} ctx
+            | Some balance ->
+                let! convertedOpt =
+                    match displayCurrencyOpt with
+                    | None -> Task.FromResult None
+                    | Some target ->
+                        task {
+                            let! postedConv = PriceConversion.convertMoneyAsync pricing balance.Posted target
+                            let! pendingConv = PriceConversion.convertMoneyAsync pricing balance.Pending target
+                            let availableConv = { Amount = postedConv.Amount + pendingConv.Amount; CurrencyCode = target }
+                            return Some {| posted = postedConv; available = availableConv; pending = pendingConv |}
+                        }
+
+                let resp : BalanceResponse = {
+                    posted = balance.Posted
+                    available = balance.Available
+                    pending = balance.Pending
+                    displayCurrency = displayCurrencyOpt
+                    converted = convertedOpt
+                }
+                do! Response.ofJson resp ctx
         }
 
     // DELETE /api/accounts/{accountId:guid}

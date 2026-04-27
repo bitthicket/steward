@@ -20,10 +20,13 @@
     <Compile Include="TransactionMatcherTests.fs" />
     <Compile Include="BudgetRepositoryTests.fs" />
     <Compile Include="BudgetPeriodRepositoryTests.fs" />
+    <Compile Include="BudgetReportTests.fs" />
     <Compile Include="DataFeedConnectionRepositoryTests.fs" />
     <Compile Include="FeedHealthWorkerTests.fs" />
     <Compile Include="RemediationAttemptRepositoryTests.fs" />
     <Compile Include="ConnectionEndpointsTests.fs" />
+    <Compile Include="MoneyTests.fs" />
+    <Compile Include="UserPreferencesEndpointsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

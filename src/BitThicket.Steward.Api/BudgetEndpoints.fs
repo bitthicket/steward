@@ -27,7 +27,7 @@ type BudgetResponse = {
     period: string
     currency: string
     style: string
-    income: decimal
+    incomeMinor: int64
     isActive: bool
     startsOn: string
     currentPeriod: BudgetPeriodResponse option
@@ -43,9 +43,10 @@ and BudgetPeriodResponse = {
 
 and BudgetPeriodCategoryResponse = {
     categoryId: Guid
-    allocated: decimal
-    openingBalance: decimal
-    rolloverBalance: decimal
+    allocatedMinor: int64
+    openingBalanceMinor: int64
+    rolloverBalanceMinor: int64
+    currency: string
     rolloverEnabled: bool
 }
 
@@ -70,6 +71,7 @@ type BudgetReportTotals = {
     allocatedMinor: int64
     spentMinor: int64
     remainingMinor: int64
+    currency: string
 }
 
 type BudgetReportCategoryItem = {
@@ -80,12 +82,14 @@ type BudgetReportCategoryItem = {
     remainingMinor: int64
     rolloverBalanceMinor: int64
     percentUsed: decimal
+    currency: string
 }
 
 type BudgetReportResponse = {
     periodId: Guid
     totals: BudgetReportTotals
     byCategory: BudgetReportCategoryItem list
+    displayCurrency: string
 }
 
 // ── JSON helpers ───────────────────────────────────────────────────────────
@@ -146,20 +150,10 @@ module private BudgetHelpers =
         | BudgetPeriod.Custom d -> startDate.AddDays(d - 1)
 
     let moneyFromMinor (minor: int64) (currency: string) : Money =
-        let places =
-            match currency.ToUpperInvariant() with
-            | "BTC" -> 8
-            | _ -> 2
-        let factor = pown 10m places
-        { Amount = decimal minor / factor; CurrencyCode = currency }
+        MoneyHelpers.fromMinorUnits minor currency
 
     let toMinor (money: Money) : int64 =
-        let places =
-            match money.CurrencyCode.ToUpperInvariant() with
-            | "BTC" -> 8
-            | _ -> 2
-        let factor = pown 10m places
-        int64 (Decimal.Round(money.Amount * factor))
+        MoneyHelpers.toMinorUnits money
 
     let validateAllocations (style: BudgetingStyle) (income: Money) (allocations: BudgetPeriodCategoryAllocation list) : Result<unit, string> =
         let totalAllocated =
@@ -189,7 +183,7 @@ module private BudgetHelpers =
             period = budgetPeriodToString budget.Period
             currency = budget.CurrencyCode
             style = budgetingStyleToString budget.Style
-            income = budget.Income.Amount
+            incomeMinor = toMinor budget.Income
             isActive = budget.IsActive
             startsOn = budget.StartsOn.ToString("yyyy-MM-dd")
             currentPeriod = currentPeriod
@@ -205,9 +199,10 @@ module private BudgetHelpers =
                 allocs
                 |> List.map (fun a -> {
                     categoryId = a.CategoryId
-                    allocated = a.AllocatedAmount.Amount
-                    openingBalance = a.OpeningBalance.Amount
-                    rolloverBalance = a.RolloverBalance.Amount
+                    allocatedMinor = toMinor a.AllocatedAmount
+                    openingBalanceMinor = toMinor a.OpeningBalance
+                    rolloverBalanceMinor = toMinor a.RolloverBalance
+                    currency = a.AllocatedAmount.CurrencyCode
                     rolloverEnabled = a.RolloverEnabled
                 })
         }
@@ -505,18 +500,26 @@ module BudgetEndpoints =
                             nextPeriodId = nextPeriod.Id
                             rolloverBalances =
                                 rolloverAllocs
-                                |> List.map (fun (cid, amount) -> {| categoryId = cid; rolloverAmount = amount |})
+                                |> List.map (fun (cid, amount) ->
+                                    {| categoryId = cid
+                                       rolloverAmountMinor = toMinor { Amount = amount; CurrencyCode = budget.CurrencyCode }
+                                       currency = budget.CurrencyCode |})
                         |}
                     do! Response.ofJson closeResponse ctx
         }
 
-    // GET /api/budgets/{id}/periods/{periodId}/report
+    // GET /api/budgets/{id}/periods/{periodId}/report?displayCurrency=USD|BTC
     let getReportHandler (budgetId: Guid) (periodId: Guid) : HttpHandler = fun ctx ->
         task {
             let budgetRepo = ctx.RequestServices.GetRequiredService<IBudgetRepository>()
             let periodRepo = ctx.RequestServices.GetRequiredService<IBudgetPeriodRepository>()
             let categoryRepo = ctx.RequestServices.GetRequiredService<ICategoryRepository>()
             let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+
+            let displayCurrencyOpt =
+                match ctx.Request.Query.TryGetValue("displayCurrency") with
+                | true, v when v.Count > 0 -> Some(v.ToString().ToUpperInvariant())
+                | _ -> None
 
             let! budgetOpt = budgetRepo.GetAsync(budgetId)
             match budgetOpt with
@@ -533,6 +536,8 @@ module BudgetEndpoints =
                     ctx.Response.StatusCode <- 404
                     do! Response.ofJson {| error = "Period not found" |} ctx
                 | Some period ->
+                    let targetCurrency = displayCurrencyOpt |> Option.defaultValue budget.CurrencyCode
+
                     let! allocs = periodRepo.ListAllocationsByPeriodAsync(periodId)
                     let! spendDetail = periodRepo.GetPeriodSpendAsync(periodId)
                     let! categories = categoryRepo.ListAsync()
@@ -540,15 +545,15 @@ module BudgetEndpoints =
                     let categoryNames =
                         categories |> List.map (fun c -> c.Id, c.Name) |> Map.ofList
 
-                    // Convert each currency amount to the budget's currency using the latest spot rate
+                    // Convert each currency amount to the target display currency using the latest spot rate
                     let! convertedSpend =
                         spendDetail
                         |> List.map (fun (catId, money) ->
                             task {
-                                if money.CurrencyCode = budget.CurrencyCode then
+                                if money.CurrencyCode = targetCurrency then
                                     return (catId, money.Amount)
                                 else
-                                    let! rate = pricing.GetSpotAsync(money.CurrencyCode, budget.CurrencyCode)
+                                    let! rate = pricing.GetSpotAsync(money.CurrencyCode, targetCurrency)
                                     return (catId, money.Amount * rate.Value)
                             })
                         |> Task.WhenAll
@@ -578,10 +583,11 @@ module BudgetEndpoints =
                                 categoryId = alloc.CategoryId
                                 name = categoryNames |> Map.tryFind alloc.CategoryId |> Option.defaultValue "Unknown"
                                 allocatedMinor = toMinor alloc.AllocatedAmount
-                                spentMinor = toMinor { Amount = spentDisplay; CurrencyCode = budget.CurrencyCode }
-                                remainingMinor = toMinor { Amount = remaining; CurrencyCode = budget.CurrencyCode }
-                                rolloverBalanceMinor = toMinor { Amount = rollover; CurrencyCode = budget.CurrencyCode }
+                                spentMinor = toMinor { Amount = spentDisplay; CurrencyCode = targetCurrency }
+                                remainingMinor = toMinor { Amount = remaining; CurrencyCode = targetCurrency }
+                                rolloverBalanceMinor = toMinor { Amount = rollover; CurrencyCode = targetCurrency }
                                 percentUsed = percentUsed
+                                currency = targetCurrency
                             }
                         )
 
@@ -595,14 +601,16 @@ module BudgetEndpoints =
                             allocatedMinor = totalAllocated
                             spentMinor = totalSpent
                             remainingMinor = totalRemaining
+                            currency = targetCurrency
                         }
                         byCategory = reportItems
+                        displayCurrency = targetCurrency
                     }
 
                     do! Response.ofJson resp ctx
         }
 
-    // GET /api/budgets/{id}/periods/current/report
+    // GET /api/budgets/{id}/periods/current/report?displayCurrency=USD|BTC
     let getCurrentReportHandler (budgetId: Guid) : HttpHandler = fun ctx ->
         task {
             let budgetRepo = ctx.RequestServices.GetRequiredService<IBudgetRepository>()

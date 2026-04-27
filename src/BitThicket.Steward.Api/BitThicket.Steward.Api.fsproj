@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="Domain.fs" />
+    <Compile Include="Money.fs" />
     <Compile Include="Migrations.fs" />
     <Compile Include="TenantContext.fs" />
     <Compile Include="Persistence.fs" />
@@ -19,12 +20,14 @@
     <Compile Include="PlaidService.fs" />
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
+    <Compile Include="UserPreferencesRepository.fs" />
     <Compile Include="ApiKeyRepository.fs" />
     <Compile Include="FeedHealthRepository.fs" />
     <Compile Include="RemediationAttemptRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
+    <Compile Include="UserPreferencesEndpoints.fs" />
     <Compile Include="ConnectionEndpoints.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="McpServer.fs" />

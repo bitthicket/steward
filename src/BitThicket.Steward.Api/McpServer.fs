@@ -9,6 +9,7 @@ open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
 open Falco
 open BitThicket.Steward.Api.Domain
+open BitThicket.Steward.Pricing
 
 // ── MCP Protocol Types (JSON-RPC 2.0 subset) ────────────────────────────────
 
@@ -23,7 +24,7 @@ module McpProtocol =
         Error: JsonElement option
     }
 
-    let private jsonOptions = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
+    let internal jsonOptions = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
 
     let serialize (value: 'a) : string = JsonSerializer.Serialize(value, jsonOptions)
     let deserialize<'a> (json: string) : 'a = JsonSerializer.Deserialize<'a>(json, jsonOptions)
@@ -151,15 +152,30 @@ module McpTools =
 
     let listAccountsTool : Tool = {
         name = "list_accounts"
-        description = "List all accounts for the current tenant."
+        description = "List all accounts for the current tenant. Optionally converts balances to a display currency."
         inputSchema = {
             ``type`` = "object"
-            properties = Map []
+            properties = Map [
+                "displayCurrency", { ``type`` = "string"; description = "Optional currency code (e.g. USD, BTC) to convert balances." }
+            ]
             required = []
         }
     }
 
-    let allTools = [ echoTool; listAccountsTool ]
+    let getAccountBalanceTool : Tool = {
+        name = "get_account_balance"
+        description = "Get the balance for a specific account. Optionally converts to a display currency."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "accountId", { ``type`` = "string"; description = "The account UUID." }
+                "displayCurrency", { ``type`` = "string"; description = "Optional currency code (e.g. USD, BTC) to convert balances." }
+            ]
+            required = ["accountId"]
+        }
+    }
+
+    let allTools = [ echoTool; listAccountsTool; getAccountBalanceTool ]
 
     let callEcho (args: JsonElement) : ToolCallResult =
         let message =
@@ -171,22 +187,78 @@ module McpTools =
             isError = false
         }
 
-    let callListAccounts (ctx: HttpContext) : ToolCallResult =
+    let tryGetDisplayCurrency (args: JsonElement) : string option =
+        match args.TryGetProperty("displayCurrency") with
+        | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString().ToUpperInvariant())
+        | _ -> None
+
+    let callListAccounts (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
         let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
         let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
         match accessor.Context with
         | None ->
             { content = [ {| ``type`` = "text"; text = "Unauthorized: no tenant context" |} :> obj ]; isError = true }
-        | Some tc ->
-            // For scaffold, return a placeholder. Real implementation queries AccountRepository.
+        | Some _tc ->
             let repo = AccountRepository.create factory accessor
-            let accounts =
-                repo.ListAsync().GetAwaiter().GetResult()
-                |> List.map (fun a -> {| name = a.Name; accountType = string a.AccountType; currency = a.CurrencyCode |})
+            let accounts = repo.ListAsync().GetAwaiter().GetResult()
+            let displayCurrencyOpt = tryGetDisplayCurrency args
+
+            let accountItems =
+                accounts
+                |> List.map (fun a ->
+                    let balanceOpt = repo.GetBalanceAsync(a.Id).GetAwaiter().GetResult()
+                    let balance = balanceOpt |> Option.defaultValue { Posted = Money.zero a.CurrencyCode; Available = Money.zero a.CurrencyCode; Pending = Money.zero a.CurrencyCode }
+                    let raw = {| posted = balance.Posted; available = balance.Available; pending = balance.Pending |}
+                    let converted =
+                        match displayCurrencyOpt with
+                        | None -> None
+                        | Some target ->
+                            let postedConv = PriceConversion.convertMoneyAsync pricing balance.Posted target |> Async.AwaitTask |> Async.RunSynchronously
+                            let pendingConv = PriceConversion.convertMoneyAsync pricing balance.Pending target |> Async.AwaitTask |> Async.RunSynchronously
+                            let availableConv = { Amount = postedConv.Amount + pendingConv.Amount; CurrencyCode = target }
+                            Some {| posted = postedConv; available = availableConv; pending = pendingConv |}
+                    {| name = a.Name; accountType = string a.AccountType; currency = a.CurrencyCode; balance = raw; converted = converted |}
+                )
+
             {
-                content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize(accounts) |} :> obj ]
+                content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize(accountItems, McpProtocol.jsonOptions) |} :> obj ]
                 isError = false
             }
+
+    let callGetAccountBalance (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+        match accessor.Context with
+        | None ->
+            { content = [ {| ``type`` = "text"; text = "Unauthorized: no tenant context" |} :> obj ]; isError = true }
+        | Some _tc ->
+            let accountIdStr =
+                match args.TryGetProperty("accountId") with
+                | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
+                | _ -> ""
+            match Guid.TryParse(accountIdStr) with
+            | false, _ ->
+                { content = [ {| ``type`` = "text"; text = "Invalid accountId" |} :> obj ]; isError = true }
+            | true, accountId ->
+                let repo = AccountRepository.create factory accessor
+                let balanceOpt = repo.GetBalanceAsync(accountId).GetAwaiter().GetResult()
+                match balanceOpt with
+                | None ->
+                    { content = [ {| ``type`` = "text"; text = "Account not found" |} :> obj ]; isError = true }
+                | Some balance ->
+                    let displayCurrencyOpt = tryGetDisplayCurrency args
+                    let converted =
+                        match displayCurrencyOpt with
+                        | None -> None
+                        | Some target ->
+                            let postedConv = PriceConversion.convertMoneyAsync pricing balance.Posted target |> Async.AwaitTask |> Async.RunSynchronously
+                            let pendingConv = PriceConversion.convertMoneyAsync pricing balance.Pending target |> Async.AwaitTask |> Async.RunSynchronously
+                            let availableConv = { Amount = postedConv.Amount + pendingConv.Amount; CurrencyCode = target }
+                            Some {| posted = postedConv; available = availableConv; pending = pendingConv |}
+                    let result = {| balance = balance; converted = converted; displayCurrency = displayCurrencyOpt |}
+                    { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize(result, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
 
 // ── MCP Resource Registry ─────────────────────────────────────────────────────
 
@@ -239,24 +311,74 @@ module McpServer =
         let result : ToolCallResult =
             match name with
             | "echo" -> McpTools.callEcho arguments
-            | "list_accounts" -> McpTools.callListAccounts ctx
+            | "list_accounts" -> McpTools.callListAccounts ctx arguments
+            | "get_account_balance" -> McpTools.callGetAccountBalance ctx arguments
             | _ -> { content = [ {| ``type`` = "text"; text = $"Unknown tool: {name}" |} :> obj ]; isError = true }
         makeResult id result
 
     let private handleResourcesList (id: JsonElement) : JsonDocument =
         makeResult id {| resources = McpResources.allResources |}
 
-    let private handleResourcesRead (id: JsonElement) (paramsEl: JsonElement) : JsonDocument =
+    let private handleResourcesRead (ctx: HttpContext) (id: JsonElement) (paramsEl: JsonElement) : JsonDocument =
         let uri =
             match paramsEl.TryGetProperty("uri") with
             | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
             | _ -> ""
+        let displayCurrencyOpt =
+            match paramsEl.TryGetProperty("displayCurrency") with
+            | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString().ToUpperInvariant())
+            | _ -> None
+
         let contents : ResourceContent list =
             match uri with
             | "steward://accounts" ->
-                [ { uri = uri; mimeType = Some "application/json"; text = Some "[]"; blob = None } ]
+                let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+                let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+                let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+                match accessor.Context with
+                | None ->
+                    [ { uri = uri; mimeType = Some "text/plain"; text = Some "Unauthorized"; blob = None } ]
+                | Some _tc ->
+                    let repo = AccountRepository.create factory accessor
+                    let accounts = repo.ListAsync().GetAwaiter().GetResult()
+                    let items =
+                        accounts
+                        |> List.map (fun a ->
+                            let balanceOpt = repo.GetBalanceAsync(a.Id).GetAwaiter().GetResult()
+                            let balance = balanceOpt |> Option.defaultValue { Posted = Money.zero a.CurrencyCode; Available = Money.zero a.CurrencyCode; Pending = Money.zero a.CurrencyCode }
+                            let converted =
+                                match displayCurrencyOpt with
+                                | None -> None
+                                | Some target ->
+                                    let postedConv = PriceConversion.convertMoneyAsync pricing balance.Posted target |> Async.AwaitTask |> Async.RunSynchronously
+                                    let pendingConv = PriceConversion.convertMoneyAsync pricing balance.Pending target |> Async.AwaitTask |> Async.RunSynchronously
+                                    let availableConv = { Amount = postedConv.Amount + pendingConv.Amount; CurrencyCode = target }
+                                    Some {| posted = postedConv; available = availableConv; pending = pendingConv |}
+                            {| name = a.Name; currency = a.CurrencyCode; balance = balance; converted = converted |}
+                        )
+                    [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(items, McpProtocol.jsonOptions)); blob = None } ]
             | "steward://transactions" ->
-                [ { uri = uri; mimeType = Some "application/json"; text = Some "[]"; blob = None } ]
+                let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+                let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+                let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+                match accessor.Context with
+                | None ->
+                    [ { uri = uri; mimeType = Some "text/plain"; text = Some "Unauthorized"; blob = None } ]
+                | Some _tc ->
+                    let txnRepo = TransactionRepository.create factory accessor
+                    let txns = txnRepo.ListAsync().GetAwaiter().GetResult()
+                    let items =
+                        txns
+                        |> List.map (fun (t: BitThicket.Steward.Api.Domain.Transaction) ->
+                            let converted =
+                                match displayCurrencyOpt with
+                                | None -> None
+                                | Some target ->
+                                    let conv = PriceConversion.convertMoneyAsync pricing t.Amount target |> Async.AwaitTask |> Async.RunSynchronously
+                                    Some conv
+                            {| description = t.Description; amount = t.Amount; converted = converted |}
+                        )
+                    [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(items, McpProtocol.jsonOptions)); blob = None } ]
             | _ ->
                 [ { uri = uri; mimeType = Some "text/plain"; text = Some "Resource not found"; blob = None } ]
         makeResult id {| contents = contents |}
@@ -289,7 +411,7 @@ module McpServer =
                             | "resources/list" -> handleResourcesList id
                             | "resources/read" ->
                                 match msg.Params with
-                                | Some p -> handleResourcesRead id p
+                                | Some p -> handleResourcesRead ctx id p
                                 | None -> makeError id (-32602) "Invalid params"
                             | _ -> makeError id (-32601) $"Method not found: {method}"
                         ctx.Response.ContentType <- "application/json"
