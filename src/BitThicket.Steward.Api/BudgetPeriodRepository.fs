@@ -155,8 +155,8 @@ module BudgetPeriodRepository =
                 allocCmd.CommandText <-
                     """INSERT INTO budget_period_categories (
                            budget_period_id, category_id, allocated_minor, opening_balance_minor,
-                           rollover_balance_minor, currency, rollover_enabled
-                       ) VALUES ($1, $2, $3, $4, $5, $6, $7)"""
+                           rollover_balance_minor, currency, rollover_enabled, tenant_id
+                       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"""
                 allocCmd.Parameters.AddWithValue("$1", alloc.BudgetPeriodId) |> ignore
                 allocCmd.Parameters.AddWithValue("$2", alloc.CategoryId) |> ignore
                 allocCmd.Parameters.AddWithValue("$3", toMinor alloc.AllocatedAmount) |> ignore
@@ -164,6 +164,7 @@ module BudgetPeriodRepository =
                 allocCmd.Parameters.AddWithValue("$5", toMinor alloc.RolloverBalance) |> ignore
                 allocCmd.Parameters.AddWithValue("$6", alloc.AllocatedAmount.CurrencyCode) |> ignore
                 allocCmd.Parameters.AddWithValue("$7", alloc.RolloverEnabled) |> ignore
+                allocCmd.Parameters.AddWithValue("$8", period.TenantId) |> ignore
                 let! _ = allocCmd.ExecuteNonQueryAsync()
                 ()
 
@@ -251,10 +252,9 @@ module BudgetPeriodRepository =
             return allocs |> Seq.toList
         }
 
-    let updateAllocationAsync (factory: IDbConnectionFactory) (allocation: BudgetPeriodCategoryAllocation) =
+    let updateAllocationAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (allocation: BudgetPeriodCategoryAllocation) =
         task {
-            let ctx = { TenantId = Guid.Empty; UserId = Guid.Empty }
-            use! conn = factory.OpenForTenantAsync(ctx)
+            use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """UPDATE budget_period_categories SET
@@ -356,7 +356,7 @@ module BudgetPeriodRepository =
             member _.DeletePeriodAsync(id) = deletePeriodAsync factory (requireCtx()) id
             member _.GetAllocationAsync(periodId, categoryId) = getAllocationAsync factory (requireCtx()) periodId categoryId
             member _.ListAllocationsByPeriodAsync(periodId) = listAllocationsByPeriodAsync factory (requireCtx()) periodId
-            member _.UpdateAllocationAsync(allocation) = updateAllocationAsync factory allocation
+            member _.UpdateAllocationAsync(allocation) = updateAllocationAsync factory (requireCtx()) allocation
             member _.GetActualSpendByCategoryAsync(periodId) = getActualSpendByCategoryAsync factory (requireCtx()) periodId
             member _.GetPeriodSpendAsync(periodId) = getPeriodSpendAsync factory (requireCtx()) periodId
         }

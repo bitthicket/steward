@@ -14,6 +14,7 @@
     <Compile Include="ApiKeyTests.fs" />
     <Compile Include="RlsIsolationTests.fs" />
     <Compile Include="AccountRepositoryTests.fs" />
+    <Compile Include="AccountEndpointsTests.fs" />
     <Compile Include="CategoryRepositoryTests.fs" />
     <Compile Include="TransactionRepositoryTests.fs" />
     <Compile Include="TransactionMatcherTests.fs" />

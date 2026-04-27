@@ -21,6 +21,7 @@
     <Compile Include="ApiKeyRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
+    <Compile Include="AccountEndpoints.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="McpServer.fs" />
     <Compile Include="PricingWorker.fs" />

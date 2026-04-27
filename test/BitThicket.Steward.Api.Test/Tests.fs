@@ -16,6 +16,11 @@ let private testAuthConfig = {
     Audience = "steward-api"
 }
 
+let private dummyDbFactory =
+    { new IDbConnectionFactory with
+        member _.OpenAsync() = failwith "not used"
+        member _.OpenForTenantAsync(_) = failwith "not used" }
+
 let private makeToken (claims: (string * string) list) =
     Jwt.createToken testAuthConfig.JwtSecret testAuthConfig.Issuer testAuthConfig.Audience claims (TimeSpan.FromHours(1.0))
 
@@ -41,7 +46,7 @@ let ``TenantContextMiddleware parses valid JWT Bearer token`` () =
         nextCalled <- true
         Task.CompletedTask)
 
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ nextCalled = true @>
@@ -56,7 +61,7 @@ let ``TenantContextMiddleware ignores missing Authorization header`` () =
     let ctx = DefaultHttpContext()
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ not (ctx.Items.ContainsKey("TenantContext")) @>
@@ -67,7 +72,7 @@ let ``TenantContextMiddleware ignores malformed Authorization header`` () =
     ctx.Request.Headers["Authorization"] <- "Basic dXNlcjpwYXNz"
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ not (ctx.Items.ContainsKey("TenantContext")) @>
@@ -79,7 +84,7 @@ let ``TenantContextMiddleware ignores invalid JWT signature`` () =
     ctx.Request.Headers["Authorization"] <- $"Bearer {token}"
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ not (ctx.Items.ContainsKey("TenantContext")) @>
@@ -99,7 +104,7 @@ let ``TenantContextMiddleware accepts token signed with previous secret`` () =
     ctx.Request.Headers["Authorization"] <- $"Bearer {token}"
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, configWithPrevious)
+    let middleware = TenantContextMiddleware(next, configWithPrevious, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ ctx.Items.ContainsKey("TenantContext") @>
@@ -114,7 +119,7 @@ let ``TenantContextMiddleware ignores expired JWT`` () =
     ctx.Request.Headers["Authorization"] <- $"Bearer {token}"
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ not (ctx.Items.ContainsKey("TenantContext")) @>
@@ -126,7 +131,7 @@ let ``TenantContextMiddleware ignores wrong issuer`` () =
     ctx.Request.Headers["Authorization"] <- $"Bearer {token}"
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ not (ctx.Items.ContainsKey("TenantContext")) @>
@@ -138,7 +143,7 @@ let ``TenantContextMiddleware ignores wrong audience`` () =
     ctx.Request.Headers["Authorization"] <- $"Bearer {token}"
 
     let next = RequestDelegate(fun _ -> Task.CompletedTask)
-    let middleware = TenantContextMiddleware(next, testAuthConfig)
+    let middleware = TenantContextMiddleware(next, testAuthConfig, dummyDbFactory)
     middleware.InvokeAsync(ctx).Wait()
 
     test <@ not (ctx.Items.ContainsKey("TenantContext")) @>
