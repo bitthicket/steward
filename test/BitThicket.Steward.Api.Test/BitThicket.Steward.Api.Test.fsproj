@@ -32,7 +32,6 @@
     <Compile Include="MoneyTests.fs" />
     <Compile Include="UserPreferencesEndpointsTests.fs" />
     <Compile Include="VaultServiceTests.fs" />
-    <Compile Include="McpToolsTests.fs" />
     <Compile Include="McpResourcesTests.fs" />
   </ItemGroup>
 
