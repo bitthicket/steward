@@ -3,6 +3,7 @@ namespace BitThicket.Steward.Api
 open System
 open System.IO
 open System.Security.Cryptography
+open System.Text.RegularExpressions
 open System.Threading.Tasks
 open BitThicket.Steward.Api.Domain
 
@@ -30,6 +31,12 @@ module LocalAttachmentStorage =
         let hash = sha.ComputeHash(bytes)
         Convert.ToHexString(hash).ToLowerInvariant()
 
+    let private validStorageRefRegex = Regex("^[0-9a-f]{64}$", RegexOptions.Compiled)
+
+    let private isValidStorageRef (storageRef: string) : bool =
+        if String.IsNullOrWhiteSpace(storageRef) then false
+        else validStorageRefRegex.IsMatch(storageRef)
+
     let private ensureDir (path: string) =
         if not (Directory.Exists(path)) then
             Directory.CreateDirectory(path) |> ignore
@@ -48,21 +55,25 @@ module LocalAttachmentStorage =
 
     let loadAsync (tenantId: Guid) (storageRef: string) =
         task {
-            let root = rootPath ()
-            let filePath = Path.Combine(root, tenantId.ToString("n"), storageRef.Substring(0, 2), storageRef)
-            if File.Exists(filePath) then
-                let! bytes = File.ReadAllBytesAsync(filePath)
-                return Some bytes
-            else
+            if not (isValidStorageRef storageRef) then
                 return None
+            else
+                let root = rootPath ()
+                let filePath = Path.Combine(root, tenantId.ToString("n"), storageRef.Substring(0, 2), storageRef)
+                if File.Exists(filePath) then
+                    let! bytes = File.ReadAllBytesAsync(filePath)
+                    return Some bytes
+                else
+                    return None
         }
 
     let deleteAsync (tenantId: Guid) (storageRef: string) =
         task {
-            let root = rootPath ()
-            let filePath = Path.Combine(root, tenantId.ToString("n"), storageRef.Substring(0, 2), storageRef)
-            if File.Exists(filePath) then
-                File.Delete(filePath)
+            if isValidStorageRef storageRef then
+                let root = rootPath ()
+                let filePath = Path.Combine(root, tenantId.ToString("n"), storageRef.Substring(0, 2), storageRef)
+                if File.Exists(filePath) then
+                    File.Delete(filePath)
         }
 
     let create () : IAttachmentStorage =

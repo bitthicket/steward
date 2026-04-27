@@ -18,11 +18,11 @@ module private AttachmentValidation =
 
     let allowedMimeTypes = [
         // Images
-        "image/jpeg"; "image/png"; "image/gif"; "image/webp"; "image/svg+xml"
+        "image/jpeg"; "image/png"; "image/gif"; "image/webp"
         // Documents
         "application/pdf"
         // Text
-        "text/plain"; "text/csv"; "text/html"
+        "text/plain"; "text/csv"
         // Common office
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -86,6 +86,58 @@ module private AttachmentHelpers =
             return ms.ToArray()
         }
 
+    let processAttachmentUpload
+        (ctx: HttpContext)
+        (tc: TenantContext)
+        (txnId: Guid)
+        (splitId: Guid option)
+        (file: Microsoft.AspNetCore.Http.IFormFile)
+        (kindStr: string)
+        =
+        task {
+            let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
+            let storage = ctx.RequestServices.GetRequiredService<IAttachmentStorage>()
+
+            let! bytes = readFormFileAsync file
+            match AttachmentValidation.validateUpload file.ContentType (int64 bytes.Length) with
+            | Error msg when msg.StartsWith("Unsupported media type") ->
+                ctx.Response.StatusCode <- 415
+                do! Response.ofJson {| error = msg |} ctx
+            | Error msg ->
+                ctx.Response.StatusCode <- 400
+                do! Response.ofJson {| error = msg |} ctx
+            | Ok () ->
+                let contentHash = sha256Hex bytes
+                let! storageRef = storage.StoreAsync tc.TenantId file.ContentType bytes
+                let kind =
+                    match kindStr.ToLowerInvariant() with
+                    | "receipt" -> AttachmentKind.Receipt
+                    | "statement" -> AttachmentKind.Statement
+                    | _ -> AttachmentKind.Other kindStr
+                let attachment: Attachment = {
+                    Id = Guid.NewGuid()
+                    TenantId = tc.TenantId
+                    TransactionId = txnId
+                    SplitId = splitId
+                    Kind = kind
+                    StorageRef = storageRef
+                    ContentHash = contentHash
+                    ContentType = file.ContentType
+                    SizeBytes = int64 bytes.Length
+                    UploadedAt = DateTimeOffset.UtcNow
+                    UploadedByUserId = Some tc.UserId
+                    UploadedByAgentId = None
+                }
+                try
+                    let! _ = attachmentRepo.CreateAsync(attachment)
+                    ctx.Response.StatusCode <- 201
+                    do! Response.ofJson (attachmentToResponse attachment) ctx
+                with
+                | ex ->
+                    do! storage.DeleteAsync tc.TenantId storageRef
+                    raise ex
+        }
+
 // ── Endpoints ──────────────────────────────────────────────────────────────
 
 module AttachmentEndpoints =
@@ -94,9 +146,7 @@ module AttachmentEndpoints =
     // POST /api/transactions/{txnId}/attachments
     let createTransactionAttachmentHandler (txnId: Guid) : HttpHandler = fun ctx ->
         task {
-            let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
             let txnRepo = ctx.RequestServices.GetRequiredService<ITransactionRepository>()
-            let storage = ctx.RequestServices.GetRequiredService<IAttachmentStorage>()
             let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
 
             match accessor.Context with
@@ -123,49 +173,15 @@ module AttachmentEndpoints =
                             ctx.Response.StatusCode <- 400
                             do! Response.ofJson {| error = "No file provided" |} ctx
                         | Some file ->
-                            match AttachmentValidation.validateUpload file.ContentType file.Length with
-                            | Error msg when msg.StartsWith("Unsupported media type") ->
-                                ctx.Response.StatusCode <- 415
-                                do! Response.ofJson {| error = msg |} ctx
-                            | Error msg ->
-                                ctx.Response.StatusCode <- 400
-                                do! Response.ofJson {| error = msg |} ctx
-                            | Ok () ->
-                                let! bytes = readFormFileAsync file
-                                let contentHash = sha256Hex bytes
-                                let! storageRef = storage.StoreAsync tc.TenantId file.ContentType bytes
-                                let kindStr = form.TryGetValue("kind") |> fst |> (fun b -> if b then form["kind"].ToString() else "other")
-                                let kind =
-                                    match kindStr.ToLowerInvariant() with
-                                    | "receipt" -> AttachmentKind.Receipt
-                                    | "statement" -> AttachmentKind.Statement
-                                    | _ -> AttachmentKind.Other kindStr
-                                let attachment: Attachment = {
-                                    Id = Guid.NewGuid()
-                                    TenantId = tc.TenantId
-                                    TransactionId = txnId
-                                    SplitId = None
-                                    Kind = kind
-                                    StorageRef = storageRef
-                                    ContentHash = contentHash
-                                    ContentType = file.ContentType
-                                    SizeBytes = file.Length
-                                    UploadedAt = DateTimeOffset.UtcNow
-                                    UploadedByUserId = Some tc.UserId
-                                    UploadedByAgentId = None
-                                }
-                                let! _ = attachmentRepo.CreateAsync(attachment)
-                                ctx.Response.StatusCode <- 201
-                                do! Response.ofJson (attachmentToResponse attachment) ctx
+                            let kindStr = form.TryGetValue("kind") |> fst |> (fun b -> if b then form["kind"].ToString() else "other")
+                            do! processAttachmentUpload ctx tc txnId None file kindStr
         }
 
     // POST /api/transactions/{txnId}/splits/{splitId}/attachments
     let createSplitAttachmentHandler (txnId: Guid) (splitId: Guid) : HttpHandler = fun ctx ->
         task {
-            let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
             let txnRepo = ctx.RequestServices.GetRequiredService<ITransactionRepository>()
             let splitRepo = ctx.RequestServices.GetRequiredService<ISplitRepository>()
-            let storage = ctx.RequestServices.GetRequiredService<IAttachmentStorage>()
             let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
 
             match accessor.Context with
@@ -201,40 +217,8 @@ module AttachmentEndpoints =
                                 ctx.Response.StatusCode <- 400
                                 do! Response.ofJson {| error = "No file provided" |} ctx
                             | Some file ->
-                                match AttachmentValidation.validateUpload file.ContentType file.Length with
-                                | Error msg when msg.StartsWith("Unsupported media type") ->
-                                    ctx.Response.StatusCode <- 415
-                                    do! Response.ofJson {| error = msg |} ctx
-                                | Error msg ->
-                                    ctx.Response.StatusCode <- 400
-                                    do! Response.ofJson {| error = msg |} ctx
-                                | Ok () ->
-                                    let! bytes = readFormFileAsync file
-                                    let contentHash = sha256Hex bytes
-                                    let! storageRef = storage.StoreAsync tc.TenantId file.ContentType bytes
-                                    let kindStr = form.TryGetValue("kind") |> fst |> (fun b -> if b then form["kind"].ToString() else "other")
-                                    let kind =
-                                        match kindStr.ToLowerInvariant() with
-                                        | "receipt" -> AttachmentKind.Receipt
-                                        | "statement" -> AttachmentKind.Statement
-                                        | _ -> AttachmentKind.Other kindStr
-                                    let attachment: Attachment = {
-                                        Id = Guid.NewGuid()
-                                        TenantId = tc.TenantId
-                                        TransactionId = txnId
-                                        SplitId = Some splitId
-                                        Kind = kind
-                                        StorageRef = storageRef
-                                        ContentHash = contentHash
-                                        ContentType = file.ContentType
-                                        SizeBytes = file.Length
-                                        UploadedAt = DateTimeOffset.UtcNow
-                                        UploadedByUserId = Some tc.UserId
-                                        UploadedByAgentId = None
-                                    }
-                                    let! _ = attachmentRepo.CreateAsync(attachment)
-                                    ctx.Response.StatusCode <- 201
-                                    do! Response.ofJson (attachmentToResponse attachment) ctx
+                                let kindStr = form.TryGetValue("kind") |> fst |> (fun b -> if b then form["kind"].ToString() else "other")
+                                do! processAttachmentUpload ctx tc txnId (Some splitId) file kindStr
         }
 
     // GET /api/attachments/{id}
@@ -263,7 +247,30 @@ module AttachmentEndpoints =
                     | Some bytes ->
                         ctx.Response.ContentType <- attachment.ContentType
                         ctx.Response.ContentLength <- int64 bytes.Length
+                        ctx.Response.Headers["Content-Disposition"] <- $"attachment; filename=\"{attachment.Id}\""
                         do! ctx.Response.Body.WriteAsync(bytes, 0, bytes.Length)
+        }
+
+    // GET /api/transactions/{txnId}/attachments
+    let listTransactionAttachmentsHandler (txnId: Guid) : HttpHandler = fun ctx ->
+        task {
+            let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
+            let txnRepo = ctx.RequestServices.GetRequiredService<ITransactionRepository>()
+            let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+
+            match accessor.Context with
+            | None ->
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            | Some _ ->
+                let! txnOpt = txnRepo.GetAsync(txnId)
+                match txnOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "Transaction not found" |} ctx
+                | Some _ ->
+                    let! attachments = attachmentRepo.ListByTransactionAsync(txnId)
+                    do! Response.ofJson {| attachments = attachments |> List.map attachmentToResponse |} ctx
         }
 
     // DELETE /api/attachments/{id}

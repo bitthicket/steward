@@ -131,8 +131,9 @@ module AttachmentRepository =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
-            cmd.CommandText <- "DELETE FROM attachments WHERE id = $1"
+            cmd.CommandText <- "DELETE FROM attachments WHERE id = $1 AND tenant_id = $2"
             cmd.Parameters.AddWithValue("$1", id) |> ignore
+            cmd.Parameters.AddWithValue("$2", tenantContext.TenantId) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()
         }

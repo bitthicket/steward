@@ -10,6 +10,7 @@ open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Http
+open Microsoft.AspNetCore.Http.Features
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.FileProviders
 open Microsoft.Extensions.Logging
@@ -100,6 +101,10 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(fun (opts: Micr
 
 let dataSource = NpgsqlDataSource.Create(connectionString)
 builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
+builder.Services.Configure<FormOptions>(fun (opts: FormOptions) ->
+    opts.MultipartBodyLengthLimit <- int64 (10 * 1024 * 1024)
+    opts.ValueLengthLimit <- 10 * 1024 * 1024
+) |> ignore
 TenantContextServices.register builder.Services |> ignore
 AuthServices.register builder.Services { JwtSecret = jwtSecret; JwtSecretPrevious = jwtSecretPrevious; Issuer = jwtIssuer; Audience = jwtAudience } |> ignore
 builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
@@ -787,6 +792,9 @@ wapp.UseRouting()
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
             AttachmentEndpoints.createSplitAttachmentHandler txnId splitId ctx))
+        get "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            AttachmentEndpoints.listTransactionAttachmentsHandler txnId ctx))
         get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
             AttachmentEndpoints.getAttachmentHandler attachmentId ctx))

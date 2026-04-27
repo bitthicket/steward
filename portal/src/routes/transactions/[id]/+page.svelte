@@ -8,6 +8,7 @@
 		createSplit,
 		updateSplit,
 		deleteSplit,
+		listTransactionAttachments,
 		uploadTransactionAttachment,
 		deleteAttachment,
 		getAttachmentUrl,
@@ -56,14 +57,15 @@
 		loading = true;
 		error = null;
 		try {
-			const [txn, splitRes, catRes] = await Promise.all([
+			const [txn, splitRes, attRes, catRes] = await Promise.all([
 				getTransaction(transactionId),
 				listSplits(transactionId),
+				listTransactionAttachments(transactionId),
 				listCategories()
 			]);
 			transaction = txn;
 			splits = splitRes.splits;
-			attachments = (txn as any).attachments || [];
+			attachments = attRes.attachments;
 			categories = catRes.categories;
 			splitCurrency = txn.amount.currencyCode;
 		} catch (e) {

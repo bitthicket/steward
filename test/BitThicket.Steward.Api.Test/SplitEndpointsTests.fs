@@ -221,13 +221,9 @@ type SplitEndpointsTests() =
             do! SplitEndpoints.createSplitHandler txnId createCtx
             test <@ createCtx.Response.StatusCode = 201 @>
 
-            // Second split that doesn't sum correctly should fail at DB trigger level
+            // Second split that doesn't sum correctly should return 400
             let createCtx2 = createHttpContextWithAuth factory token
             setJsonBody createCtx2 """{"amountMinor":-6000,"currency":"USD","sortOrder":1}"""
-            try
-                do! SplitEndpoints.createSplitHandler txnId createCtx2
-                test <@ false @> // Should not reach here
-            with
-            | :? Npgsql.PostgresException as ex ->
-                test <@ ex.SqlState = "P0001" @> // RAISE EXCEPTION
+            do! SplitEndpoints.createSplitHandler txnId createCtx2
+            test <@ createCtx2.Response.StatusCode = 400 @>
         }

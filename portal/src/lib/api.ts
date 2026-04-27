@@ -224,6 +224,10 @@ export async function deleteSplit(transactionId: string, splitId: string) {
 
 // ── Attachments ────────────────────────────────────────────────────────────
 
+export async function listTransactionAttachments(transactionId: string) {
+	return api<{ attachments: Attachment[] }>(`/api/transactions/${transactionId}/attachments`);
+}
+
 export async function uploadTransactionAttachment(
 	transactionId: string,
 	file: File,
