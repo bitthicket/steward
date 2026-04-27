@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="Tests.fs" />
+    <Compile Include="TestHelpers.fs" />
     <Compile Include="PersistenceTests.fs" />
     <Compile Include="AuthTests.fs" />
     <Compile Include="ApiKeyTests.fs" />
@@ -20,6 +21,10 @@
     <Compile Include="TransactionRepositoryTests.fs" />
     <Compile Include="TransactionMatcherTests.fs" />
     <Compile Include="TransactionEndpointsTests.fs" />
+    <Compile Include="SplitRepositoryTests.fs" />
+    <Compile Include="SplitEndpointsTests.fs" />
+    <Compile Include="AttachmentRepositoryTests.fs" />
+    <Compile Include="AttachmentEndpointsTests.fs" />
     <Compile Include="ReconciliationRepositoryTests.fs" />
     <Compile Include="ReconciliationEndpointsTests.fs" />
     <Compile Include="BudgetRepositoryTests.fs" />

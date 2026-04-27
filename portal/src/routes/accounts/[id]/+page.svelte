@@ -391,16 +391,18 @@
 												</div>
 											</div>
 										{:else}
-											<p class="text-sm font-medium text-gray-900">{txn.description}</p>
-											<p class="text-xs text-gray-500">
-												{formatDate(txn.occurredAt)}
-												{#if txn.merchant}
-													· {txn.merchant}
-												{/if}
-												<span class="ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {statusBadge(txn.status)}">
-													{txn.status}
-												</span>
-											</p>
+											<a href="/transactions/{txn.id}" class="block hover:underline">
+												<p class="text-sm font-medium text-gray-900">{txn.description}</p>
+												<p class="text-xs text-gray-500">
+													{formatDate(txn.occurredAt)}
+													{#if txn.merchant}
+														· {txn.merchant}
+													{/if}
+													<span class="ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {statusBadge(txn.status)}">
+														{txn.status}
+													</span>
+												</p>
+											</a>
 										{/if}
 									</div>
 									<div class="flex items-center gap-4">

@@ -107,6 +107,15 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     TransactionRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<ISplitRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    SplitRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IAttachmentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    AttachmentRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAttachmentStorage>(LocalAttachmentStorage.create()) |> ignore
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
@@ -755,6 +764,35 @@ wapp.UseRouting()
         delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             TransactionEndpoints.deleteTransactionHandler txnId ctx))
+        // Splits
+        get "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitEndpoints.listSplitsHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitEndpoints.createSplitHandler txnId ctx))
+        patch "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitEndpoints.updateSplitHandler txnId splitId ctx))
+        delete "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitEndpoints.deleteSplitHandler txnId splitId ctx))
+        // Attachments
+        post "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            AttachmentEndpoints.createTransactionAttachmentHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits/{splitId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            AttachmentEndpoints.createSplitAttachmentHandler txnId splitId ctx))
+        get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            AttachmentEndpoints.getAttachmentHandler attachmentId ctx))
+        delete "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            AttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->

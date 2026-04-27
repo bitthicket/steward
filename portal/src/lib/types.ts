@@ -61,6 +61,30 @@ export interface Transaction {
 	updatedAt: string;
 }
 
+export interface TransactionSplit {
+	id: string;
+	transactionId: string;
+	amount: number;
+	currency: string;
+	categoryId: string | null;
+	description: string | null;
+	memo: string | null;
+	source: string;
+	sortOrder: number;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface Attachment {
+	id: string;
+	transactionId: string;
+	splitId: string | null;
+	kind: string;
+	contentType: string;
+	sizeBytes: number;
+	uploadedAt: string;
+}
+
 export type ConnectionStatus =
 	| { type: 'Active' }
 	| { type: 'NeedsReauth' }
