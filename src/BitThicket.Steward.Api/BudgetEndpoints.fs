@@ -8,6 +8,7 @@ open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
 open Falco
 open BitThicket.Steward.Api.Domain
+open BitThicket.Steward.Pricing
 
 // ── Request / response DTOs ────────────────────────────────────────────────
 
@@ -61,6 +62,30 @@ and PeriodAllocationRequest = {
 type UpdateAllocationRequest = {
     amountMinor: int64
     rolloverEnabled: bool option
+}
+
+// ── Report DTOs ────────────────────────────────────────────────────────────
+
+type BudgetReportTotals = {
+    allocatedMinor: int64
+    spentMinor: int64
+    remainingMinor: int64
+}
+
+type BudgetReportCategoryItem = {
+    categoryId: Guid
+    name: string
+    allocatedMinor: int64
+    spentMinor: int64
+    remainingMinor: int64
+    rolloverBalanceMinor: int64
+    percentUsed: decimal
+}
+
+type BudgetReportResponse = {
+    periodId: Guid
+    totals: BudgetReportTotals
+    byCategory: BudgetReportCategoryItem list
 }
 
 // ── JSON helpers ───────────────────────────────────────────────────────────
@@ -483,4 +508,117 @@ module BudgetEndpoints =
                                 |> List.map (fun (cid, amount) -> {| categoryId = cid; rolloverAmount = amount |})
                         |}
                     do! Response.ofJson closeResponse ctx
+        }
+
+    // GET /api/budgets/{id}/periods/{periodId}/report
+    let getReportHandler (budgetId: Guid) (periodId: Guid) : HttpHandler = fun ctx ->
+        task {
+            let budgetRepo = ctx.RequestServices.GetRequiredService<IBudgetRepository>()
+            let periodRepo = ctx.RequestServices.GetRequiredService<IBudgetPeriodRepository>()
+            let categoryRepo = ctx.RequestServices.GetRequiredService<ICategoryRepository>()
+            let pricing = ctx.RequestServices.GetRequiredService<IPriceProvider>()
+
+            let! budgetOpt = budgetRepo.GetAsync(budgetId)
+            match budgetOpt with
+            | None ->
+                ctx.Response.StatusCode <- 404
+                do! Response.ofJson {| error = "Budget not found" |} ctx
+            | Some budget ->
+                let! periodOpt = periodRepo.GetPeriodAsync(periodId)
+                match periodOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "Period not found" |} ctx
+                | Some period when period.BudgetId <> budgetId ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "Period not found" |} ctx
+                | Some period ->
+                    let! allocs = periodRepo.ListAllocationsByPeriodAsync(periodId)
+                    let! spendDetail = periodRepo.GetPeriodSpendAsync(periodId)
+                    let! categories = categoryRepo.ListAsync()
+
+                    let categoryNames =
+                        categories |> List.map (fun c -> c.Id, c.Name) |> Map.ofList
+
+                    // Convert each currency amount to the budget's currency using the latest spot rate
+                    let! convertedSpend =
+                        spendDetail
+                        |> List.map (fun (catId, money) ->
+                            task {
+                                if money.CurrencyCode = budget.CurrencyCode then
+                                    return (catId, money.Amount)
+                                else
+                                    let! rate = pricing.GetSpotAsync(money.CurrencyCode, budget.CurrencyCode)
+                                    return (catId, money.Amount * rate.Value)
+                            })
+                        |> Task.WhenAll
+
+                    // Group by category and sum
+                    let spendByCategory =
+                        convertedSpend
+                        |> Array.toList
+                        |> List.groupBy fst
+                        |> List.map (fun (catId, items) -> catId, items |> List.sumBy snd)
+                        |> Map.ofList
+
+                    let reportItems =
+                        allocs
+                        |> List.map (fun alloc ->
+                            let spentSigned = spendByCategory |> Map.tryFind alloc.CategoryId |> Option.defaultValue 0m
+                            let allocated = alloc.AllocatedAmount.Amount
+                            let spentDisplay = -spentSigned
+                            let remaining = allocated + spentSigned
+                            let rollover = alloc.RolloverBalance.Amount
+                            let percentUsed =
+                                if allocated <> 0m then
+                                    Decimal.Round(Math.Min(100m, Math.Max(0m, -spentSigned / allocated * 100m)), 2)
+                                else 0m
+
+                            {
+                                categoryId = alloc.CategoryId
+                                name = categoryNames |> Map.tryFind alloc.CategoryId |> Option.defaultValue "Unknown"
+                                allocatedMinor = toMinor alloc.AllocatedAmount
+                                spentMinor = toMinor { Amount = spentDisplay; CurrencyCode = budget.CurrencyCode }
+                                remainingMinor = toMinor { Amount = remaining; CurrencyCode = budget.CurrencyCode }
+                                rolloverBalanceMinor = toMinor { Amount = rollover; CurrencyCode = budget.CurrencyCode }
+                                percentUsed = percentUsed
+                            }
+                        )
+
+                    let totalAllocated = reportItems |> List.sumBy (fun i -> i.allocatedMinor)
+                    let totalSpent = reportItems |> List.sumBy (fun i -> i.spentMinor)
+                    let totalRemaining = reportItems |> List.sumBy (fun i -> i.remainingMinor)
+
+                    let resp = {
+                        periodId = periodId
+                        totals = {
+                            allocatedMinor = totalAllocated
+                            spentMinor = totalSpent
+                            remainingMinor = totalRemaining
+                        }
+                        byCategory = reportItems
+                    }
+
+                    do! Response.ofJson resp ctx
+        }
+
+    // GET /api/budgets/{id}/periods/current/report
+    let getCurrentReportHandler (budgetId: Guid) : HttpHandler = fun ctx ->
+        task {
+            let budgetRepo = ctx.RequestServices.GetRequiredService<IBudgetRepository>()
+            let periodRepo = ctx.RequestServices.GetRequiredService<IBudgetPeriodRepository>()
+
+            let! budgetOpt = budgetRepo.GetAsync(budgetId)
+            match budgetOpt with
+            | None ->
+                ctx.Response.StatusCode <- 404
+                do! Response.ofJson {| error = "Budget not found" |} ctx
+            | Some _ ->
+                let! openPeriodOpt = periodRepo.GetOpenPeriodAsync(budgetId)
+                match openPeriodOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "No open period for this budget" |} ctx
+                | Some period ->
+                    do! getReportHandler budgetId period.Id ctx
         }

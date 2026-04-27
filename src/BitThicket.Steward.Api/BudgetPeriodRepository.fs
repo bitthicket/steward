@@ -19,6 +19,11 @@ type IBudgetPeriodRepository =
     abstract ListAllocationsByPeriodAsync : periodId:Guid -> Task<BudgetPeriodCategoryAllocation list>
     abstract UpdateAllocationAsync : allocation:BudgetPeriodCategoryAllocation -> Task<unit>
     abstract GetActualSpendByCategoryAsync : periodId:Guid -> Task<Map<Guid, Money>>
+    /// Returns actual spend per category for the given period as a list of
+    /// (categoryId, Money) tuples.  Unlike GetActualSpendByCategoryAsync, this
+    /// preserves multiple currencies per category so the caller can convert
+    /// and sum appropriately.
+    abstract GetPeriodSpendAsync : periodId:Guid -> Task<(Guid * Money) list>
 
 module BudgetPeriodRepository =
 
@@ -302,6 +307,37 @@ module BudgetPeriodRepository =
             return result
         }
 
+    /// Returns actual spend per category as a list of (categoryId, Money) tuples,
+    /// preserving multiple currencies per category for correct report-time conversion.
+    let getPeriodSpendAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (periodId: Guid) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT
+                       t.category_id,
+                       COALESCE(SUM(t.amount_minor), 0) AS spent_minor,
+                       t.currency
+                   FROM transactions t
+                   JOIN budget_periods bp ON bp.id = $1
+                   WHERE t.tenant_id = current_setting('steward.tenant_id')::uuid
+                     AND t.occurred_at >= bp.start_date
+                     AND t.occurred_at <  bp.end_date + INTERVAL '1 day'
+                     AND t.status IN ('cleared', 'reconciled')
+                     AND t.category_id IS NOT NULL
+                   GROUP BY t.category_id, t.currency"""
+            cmd.Parameters.AddWithValue("$1", periodId) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let result = ResizeArray<(Guid * Money)>()
+            while! reader.ReadAsync() do
+                let categoryId = reader.GetGuid(0)
+                let spentMinor = reader.GetInt64(1)
+                let currency = reader.GetString(2)
+                result.Add(categoryId, fromMinor spentMinor currency)
+            return result |> Seq.toList
+        }
+
     /// Create an IBudgetPeriodRepository backed by the given connection factory and
     /// tenant context accessor.
     let create (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) : IBudgetPeriodRepository =
@@ -322,4 +358,5 @@ module BudgetPeriodRepository =
             member _.ListAllocationsByPeriodAsync(periodId) = listAllocationsByPeriodAsync factory (requireCtx()) periodId
             member _.UpdateAllocationAsync(allocation) = updateAllocationAsync factory allocation
             member _.GetActualSpendByCategoryAsync(periodId) = getActualSpendByCategoryAsync factory (requireCtx()) periodId
+            member _.GetPeriodSpendAsync(periodId) = getPeriodSpendAsync factory (requireCtx()) periodId
         }
