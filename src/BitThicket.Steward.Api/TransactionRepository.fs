@@ -10,10 +10,13 @@ open BitThicket.Steward.Api.Domain
 /// Repository for tenant-scoped transactions.
 type ITransactionRepository =
     abstract GetAsync : id:Guid -> Task<Transaction option>
+    abstract GetByExternalIdAsync : externalId:string -> Task<Transaction option>
     abstract ListByAccountAsync : accountId:Guid -> Task<Transaction list>
     abstract CreateAsync : transaction:Transaction -> Task<Guid>
     abstract UpdateAsync : transaction:Transaction -> Task<unit>
     abstract DeleteAsync : id:Guid -> Task<unit>
+    abstract ListMatchCandidatesAsync : accountId:Guid -> Task<Transaction list>
+    abstract ListNeedsReviewAsync : unit -> Task<Transaction list>
 
 module TransactionRepository =
 
@@ -74,7 +77,7 @@ module TransactionRepository =
 
     // ── Row mapping ──────────────────────────────────────────────────────────
 
-    let private mapTransaction (reader: DbDataReader) : Transaction =
+    let internal mapTransaction (reader: DbDataReader) : Transaction =
         {
             Id = reader.GetGuid(0)
             TenantId = reader.GetGuid(1)
@@ -110,6 +113,23 @@ module TransactionRepository =
                           status, match_confidence, sync_event_id, created_at, updated_at
                    FROM transactions WHERE id = $1"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let! hasRow = reader.ReadAsync()
+            return if hasRow then Some(mapTransaction reader) else None
+        }
+
+    let getByExternalIdAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (externalId: string) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
+                          amount_minor, currency, description, merchant, memo,
+                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
+                          status, match_confidence, sync_event_id, created_at, updated_at
+                   FROM transactions WHERE external_id = $1"""
+            cmd.Parameters.AddWithValue("$1", externalId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
             let! hasRow = reader.ReadAsync()
@@ -275,6 +295,50 @@ module TransactionRepository =
             return ()
         }
 
+    let listMatchCandidatesAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (accountId: Guid) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
+                          amount_minor, currency, description, merchant, memo,
+                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
+                          status, match_confidence, sync_event_id, created_at, updated_at
+                   FROM transactions
+                   WHERE account_id = $1
+                     AND source ->> 'type' = 'manual'
+                     AND status IN ('pending', 'cleared')
+                     AND matched_transaction_id IS NULL
+                   ORDER BY occurred_at DESC"""
+            cmd.Parameters.AddWithValue("$1", accountId) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let txns = ResizeArray<Transaction>()
+            while! reader.ReadAsync() do
+                txns.Add(mapTransaction reader)
+            return txns |> Seq.toList
+        }
+
+    let listNeedsReviewAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, account_id, occurred_at, posted_at,
+                          amount_minor, currency, description, merchant, memo,
+                          category_id, source, external_id, matched_transaction_id, transfer_account_id,
+                          status, match_confidence, sync_event_id, created_at, updated_at
+                   FROM transactions
+                   WHERE status = 'needs_review'
+                   ORDER BY occurred_at DESC"""
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let txns = ResizeArray<Transaction>()
+            while! reader.ReadAsync() do
+                txns.Add(mapTransaction reader)
+            return txns |> Seq.toList
+        }
+
     /// Create an ITransactionRepository backed by the given connection factory and
     /// tenant context accessor.
     let create (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) : ITransactionRepository =
@@ -285,8 +349,11 @@ module TransactionRepository =
 
         { new ITransactionRepository with
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
+            member _.GetByExternalIdAsync(externalId) = getByExternalIdAsync factory (requireCtx()) externalId
             member _.ListByAccountAsync(accountId) = listByAccountAsync factory (requireCtx()) accountId
             member _.CreateAsync(txn) = createAsync factory txn
             member _.UpdateAsync(txn) = updateAsync factory txn
             member _.DeleteAsync(id) = deleteAsync factory (requireCtx()) id
+            member _.ListMatchCandidatesAsync(accountId) = listMatchCandidatesAsync factory (requireCtx()) accountId
+            member _.ListNeedsReviewAsync() = listNeedsReviewAsync factory (requireCtx())
         }
