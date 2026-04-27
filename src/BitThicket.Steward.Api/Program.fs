@@ -112,6 +112,10 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     TransactionRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<ICreditCardPaymentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    CreditCardPaymentRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<ISplitRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -844,6 +848,10 @@ wapp.UseRouting()
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Transfers and credit card payments
+        post "/api/transfers" (AuthHelpers.requireAuth TransferEndpoints.createTransferHandler)
+        post "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.createCreditCardPaymentHandler)
+        get "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.listCreditCardPaymentsHandler)
         // Categories
         get "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.listCategoriesHandler)
         get "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
@@ -922,6 +930,12 @@ wapp.UseRouting()
         post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
+=======
+        // Transfers and credit card payments
+        post "/api/transfers" (AuthHelpers.requireAuth TransferEndpoints.createTransferHandler)
+        post "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.createCreditCardPaymentHandler)
+        get "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.listCreditCardPaymentsHandler)
+>>>>>>> 47f0a62 (STE-25: credit card payments + transfers)
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
