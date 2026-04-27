@@ -514,9 +514,9 @@ type RemediationAttempt = {
 
 [<RequireQualifiedAccess>]
 type ReconciliationStatus =
-    | InProgress
+    | Open
     | Completed
-    | Abandoned
+    | Aborted
 
 type Reconciliation = {
     Id: Guid
@@ -525,8 +525,8 @@ type Reconciliation = {
     StatementBalance: Money
     StatementDate: DateOnly
     Status: ReconciliationStatus
-    MatchedCount: int
-    UnmatchedCount: int
+    Note: string option
+    CreatedByUserId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
 }

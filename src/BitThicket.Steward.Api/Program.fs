@@ -103,6 +103,10 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
+builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    ReconciliationRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IBudgetRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -697,6 +701,20 @@ wapp.UseRouting()
             BudgetEndpoints.getCurrentReportHandler budgetId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
+        // Reconciliations
+        post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
+        get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.getReconciliationHandler id ctx))
+        patch "/api/reconciliations/{reconciliationId:guid}/transactions" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.updateTransactionsHandler id ctx))
+        post "/api/reconciliations/{reconciliationId:guid}/complete" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.completeHandler id ctx))
+        post "/api/reconciliations/{reconciliationId:guid}/abort" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.abortHandler id ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
         // API key management

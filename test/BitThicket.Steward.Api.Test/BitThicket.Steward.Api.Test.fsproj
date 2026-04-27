@@ -18,6 +18,8 @@
     <Compile Include="CategoryRepositoryTests.fs" />
     <Compile Include="TransactionRepositoryTests.fs" />
     <Compile Include="TransactionMatcherTests.fs" />
+    <Compile Include="ReconciliationRepositoryTests.fs" />
+    <Compile Include="ReconciliationEndpointsTests.fs" />
     <Compile Include="BudgetRepositoryTests.fs" />
     <Compile Include="BudgetPeriodRepositoryTests.fs" />
     <Compile Include="BudgetReportTests.fs" />
