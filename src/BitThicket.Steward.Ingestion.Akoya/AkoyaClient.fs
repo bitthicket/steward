@@ -60,12 +60,11 @@ type SyncTriggerResult = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type IAkoyaClient =
-    abstract FetchAccountsAsync : accessToken:string -> Task<FdxAccount list>
-    abstract FetchTransactionsAsync : accessToken:string * accountId:string -> Task<FdxTransaction list>
+    abstract FetchAccountsAsync : customerId:string * institutionId:string * accessToken:string -> Task<FdxAccount list>
+    abstract FetchTransactionsAsync : customerId:string * institutionId:string * accessToken:string * accountId:string -> Task<FdxTransaction list>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stubbed FDX client — returns canned data so wiring is testable end-to-end.
-// Real HTTP calls and OAuth token management will be implemented in D5/D6.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
@@ -73,7 +72,7 @@ type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
     let mutable requestCount = 0
 
     interface IAkoyaClient with
-        member _.FetchAccountsAsync(accessToken) =
+        member _.FetchAccountsAsync(customerId, institutionId, accessToken) =
             task {
                 requestCount <- requestCount + 1
                 // Canned accounts for end-to-end wiring tests.
@@ -93,7 +92,7 @@ type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
                 ]
             }
 
-        member _.FetchTransactionsAsync(accessToken, accountId) =
+        member _.FetchTransactionsAsync(customerId, institutionId, accessToken, accountId) =
             task {
                 requestCount <- requestCount + 1
                 let now = DateTimeOffset.UtcNow
@@ -130,6 +129,150 @@ type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
                         Memo = None
                     }
                 ]
+            }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Real FDX HTTP client — calls Akoya FDX API for accounts and transactions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type AkoyaFdxHttpClient(config: AkoyaConfig, http: HttpClient) =
+
+    let baseUrl = AkoyaConfig.fdxBaseUrl config
+
+    let parseAccount (el: System.Text.Json.JsonElement) : FdxAccount =
+        {
+            AccountId =
+                match el.TryGetProperty("accountId") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("account_id") with
+                    | true, p -> p.GetString()
+                    | _ -> ""
+            AccountType =
+                match el.TryGetProperty("accountType") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("account_type") with
+                    | true, p -> p.GetString()
+                    | _ -> "UNKNOWN"
+            DisplayName =
+                match el.TryGetProperty("displayName") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("nickname") with
+                    | true, p -> p.GetString()
+                    | _ -> ""
+            Currency =
+                match el.TryGetProperty("currency") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("currencyCode") with
+                    | true, p -> p.GetString()
+                    | _ -> "USD"
+        }
+
+    let parseTransaction (el: System.Text.Json.JsonElement) : FdxTransaction =
+        let tryGetDateTime (el: System.Text.Json.JsonElement) (name: string) =
+            match el.TryGetProperty(name) with
+            | true, p when p.ValueKind <> System.Text.Json.JsonValueKind.Null ->
+                match DateTimeOffset.TryParse(p.GetString()) with
+                | true, d -> Some d
+                | _ -> None
+            | _ -> None
+
+        {
+            TransactionId =
+                match el.TryGetProperty("transactionId") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("transaction_id") with
+                    | true, p -> p.GetString()
+                    | _ -> ""
+            AccountId =
+                match el.TryGetProperty("accountId") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("account_id") with
+                    | true, p -> p.GetString()
+                    | _ -> ""
+            Amount =
+                match el.TryGetProperty("amount") with
+                | true, p -> p.GetDecimal()
+                | _ -> 0m
+            Currency =
+                match el.TryGetProperty("currency") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("currencyCode") with
+                    | true, p -> p.GetString()
+                    | _ -> "USD"
+            Description =
+                match el.TryGetProperty("description") with
+                | true, p -> p.GetString()
+                | _ ->
+                    match el.TryGetProperty("memo") with
+                    | true, p -> p.GetString()
+                    | _ -> ""
+            TransactionDate =
+                tryGetDateTime el "transactionDate"
+                |> Option.defaultValue (tryGetDateTime el "transaction_date" |> Option.defaultValue DateTimeOffset.UtcNow)
+            PostingDate =
+                tryGetDateTime el "postingDate"
+                |> Option.orElse (tryGetDateTime el "posting_date")
+            Memo =
+                match el.TryGetProperty("memo") with
+                | true, p when p.ValueKind <> System.Text.Json.JsonValueKind.Null -> Some(p.GetString())
+                | _ -> None
+        }
+
+    let parseAccountsResponse (doc: System.Text.Json.JsonDocument) : FdxAccount list =
+        let root = doc.RootElement
+        // Try object-wrapped array first, then bare array
+        match root.ValueKind with
+        | System.Text.Json.JsonValueKind.Array ->
+            root.EnumerateArray() |> Seq.map parseAccount |> Seq.toList
+        | _ ->
+            match root.TryGetProperty("accounts") with
+            | true, arr -> arr.EnumerateArray() |> Seq.map parseAccount |> Seq.toList
+            | _ -> []
+
+    let parseTransactionsResponse (doc: System.Text.Json.JsonDocument) : FdxTransaction list =
+        let root = doc.RootElement
+        match root.ValueKind with
+        | System.Text.Json.JsonValueKind.Array ->
+            root.EnumerateArray() |> Seq.map parseTransaction |> Seq.toList
+        | _ ->
+            match root.TryGetProperty("transactions") with
+            | true, arr -> arr.EnumerateArray() |> Seq.map parseTransaction |> Seq.toList
+            | _ -> []
+
+    interface IAkoyaClient with
+        member _.FetchAccountsAsync(customerId: string, institutionId: string, accessToken: string) =
+            task {
+                let url = $"{baseUrl}/fdx/v1/accounts"
+                let req = new HttpRequestMessage(HttpMethod.Get, url)
+                req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
+                req.Headers.Add("x-akoya-institution-id", institutionId)
+                let! resp = http.SendAsync(req)
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    failwith $"Akoya FDX accounts error {(int)resp.StatusCode}: {body}"
+                use doc = System.Text.Json.JsonDocument.Parse(body)
+                return parseAccountsResponse doc
+            }
+
+        member _.FetchTransactionsAsync(customerId: string, institutionId: string, accessToken: string, accountId: string) =
+            task {
+                let url = $"{baseUrl}/fdx/v1/accounts/{accountId}/transactions"
+                let req = new HttpRequestMessage(HttpMethod.Get, url)
+                req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
+                req.Headers.Add("x-akoya-institution-id", institutionId)
+                let! resp = http.SendAsync(req)
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    failwith $"Akoya FDX transactions error {(int)resp.StatusCode}: {body}"
+                use doc = System.Text.Json.JsonDocument.Parse(body)
+                return parseTransactionsResponse doc
             }
 
 // ─────────────────────────────────────────────────────────────────────────────

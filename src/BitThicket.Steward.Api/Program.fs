@@ -1,4 +1,5 @@
 open System
+open System.Collections.Generic
 open System.IO
 open System.Net.Http
 open System.Reflection
@@ -490,11 +491,51 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
                 match akoyaIngestionUrl, serviceToken with
                 | Some url, Some token ->
                     let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+                    let vault = ctx.RequestServices.GetRequiredService<IVaultService>()
+                    let accountRepo = AccountRepository.create factory accessor
+
+                    let customerId, institutionId =
+                        match conn.Metadata with
+                        | ProviderMetadata.Akoya(c, i) -> c, i
+                        | _ -> failwith "Connection metadata is not Akoya"
+
+                    // Load vault credentials for this connection
+                    let! envelope =
+                        task {
+                            try
+                                return! vault.LoadAsync({ TenantId = tenantId; UserId = conn.UserId }, conn.CredentialRef)
+                            with :? KeyNotFoundException ->
+                                return failwith $"Vault credential not found for ref {conn.CredentialRef}"
+                        }
+
+                    // Build linked account mapping (externalId -> local accountId)
+                    let! linkedAccounts =
+                        conn.LinkedAccountIds
+                        |> List.map (fun accId -> task {
+                            let! accOpt = accountRepo.GetAsync(accId)
+                            return accOpt |> Option.map (fun a -> {| localAccountId = a.Id; externalAccountId = a.ExternalId |})
+                        })
+                        |> Task.WhenAll
+
                     let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
                     req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
                     let payload = System.Text.Json.Nodes.JsonObject()
                     payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
                     payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    payload["customerId"] <- System.Text.Json.Nodes.JsonValue.Create(customerId)
+                    payload["institutionId"] <- System.Text.Json.Nodes.JsonValue.Create(institutionId)
+                    payload["accessToken"] <- System.Text.Json.Nodes.JsonValue.Create(envelope.AccessToken)
+
+                    let accountsArr = System.Text.Json.Nodes.JsonArray()
+                    for acc in linkedAccounts |> Array.choose id do
+                        let accObj = System.Text.Json.Nodes.JsonObject()
+                        accObj["localAccountId"] <- System.Text.Json.Nodes.JsonValue.Create(acc.localAccountId.ToString())
+                        match acc.externalAccountId with
+                        | Some extId -> accObj["externalAccountId"] <- System.Text.Json.Nodes.JsonValue.Create(extId)
+                        | None -> ()
+                        accountsArr.Add(accObj)
+                    payload["linkedAccounts"] <- accountsArr
+
                     req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
                     let! resp = http.SendAsync(req)
                     let! body = resp.Content.ReadAsStringAsync()

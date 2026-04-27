@@ -43,6 +43,9 @@ let tryGetGuid (el: JsonElement) (name: string) =
 let requireGuid (el: JsonElement) (name: string) =
     match tryGetGuid el name with Some g -> g | None -> failwith $"Missing required field: {name}"
 
+let requireString (el: JsonElement) (name: string) =
+    match tryGetString el name with Some s -> s | None -> failwith $"Missing required field: {name}"
+
 // ── Service-auth wrapper ─────────────────────────────────────────────────────
 
 let requireServiceToken (next: HttpHandler) : HttpHandler = fun ctx ->
@@ -174,23 +177,73 @@ module InternalApiClient =
                 return Error $"Core API request failed: {ex.Message}"
         }
 
+    let postConnectionStatus (http: HttpClient) (connectionId: Guid) (status: string) (message: string option) =
+        task {
+            try
+                let root = System.Text.Json.Nodes.JsonObject()
+                root["id"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                root["status"] <- System.Text.Json.Nodes.JsonValue.Create(status)
+                match message with
+                | Some m -> root["message"] <- System.Text.Json.Nodes.JsonValue.Create(m)
+                | None -> ()
+
+                let req = buildRequest "POST" "/internal/connections/status" (Some(root.ToJsonString()))
+                let! resp = http.SendAsync(req)
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    return Error $"Core API returned {(int)resp.StatusCode}: {body}"
+                else
+                    return Ok ()
+            with ex ->
+                return Error $"Core API request failed: {ex.Message}"
+        }
+
 // ── Route handlers ───────────────────────────────────────────────────────────
 
 let healthHandler : HttpHandler = fun ctx ->
     Response.ofJson {| status = "ok"; version = version; service = "akoya-ingestion" |} ctx
 
-let syncTriggerHandler (client: IAkoyaClient) (http: HttpClient) (logger: ILogger) : HttpHandler = fun ctx ->
+type LinkedAccountMapping = {
+    LocalAccountId: Guid
+    ExternalAccountId: string option
+}
+
+let syncTriggerHandler (clientFactory: HttpClient -> IAkoyaClient) (http: HttpClient) (logger: ILogger) : HttpHandler = fun ctx ->
     task {
         let! doc = readJsonBody ctx
         let root = doc.RootElement
 
         let tenantId = requireGuid root "tenantId"
         let connectionId = requireGuid root "connectionId"
+        let customerId = requireString root "customerId"
+        let institutionId = requireString root "institutionId"
+        let accessToken = requireString root "accessToken"
+
+        let linkedAccounts =
+            match root.TryGetProperty("linkedAccounts") with
+            | true, arr ->
+                arr.EnumerateArray()
+                |> Seq.map (fun el ->
+                    let localId = requireGuid el "localAccountId"
+                    let externalId = tryGetString el "externalAccountId"
+                    { LocalAccountId = localId; ExternalAccountId = externalId })
+                |> Seq.toList
+            | _ -> []
+
         let accountIdOpt = tryGetString root "accountId"
 
+        // Build mapping from external account ID -> local account ID
+        let externalToLocalMap =
+            linkedAccounts
+            |> List.choose (fun a ->
+                match a.ExternalAccountId with
+                | Some ext -> Some(ext, a.LocalAccountId)
+                | None -> None)
+            |> Map.ofList
+
         logger.LogInformation(
-            "Sync triggered for tenant={TenantId} connection={ConnectionId} account={AccountId}",
-            tenantId, connectionId, (accountIdOpt |> Option.defaultValue "(all)"))
+            "Sync triggered for tenant={TenantId} connection={ConnectionId} customer={CustomerId} institution={InstitutionId} accounts={AccountCount}",
+            tenantId, connectionId, customerId, institutionId, linkedAccounts.Length)
 
         // 1. Start sync event (optional — endpoint may not exist yet)
         let! syncEventIdOpt =
@@ -203,76 +256,139 @@ let syncTriggerHandler (client: IAkoyaClient) (http: HttpClient) (logger: ILogge
                     return None
             }
 
-        // 2. Fetch accounts from Akoya (stubbed — returns canned data)
-        // In D5/D6 this will use real OAuth tokens from the vault.
-        let! accounts = client.FetchAccountsAsync("stub-access-token")
+        let client = clientFactory http
 
-        let accountsToSync =
-            match accountIdOpt with
-            | Some accountId -> accounts |> List.filter (fun a -> a.AccountId = accountId)
-            | None -> accounts
+        let mutable akoyaError = false
+        let mutable akoyaErrorMessage = ""
 
-        logger.LogInformation(
-            "Fetched {AccountCount} accounts from Akoya for tenant={TenantId}",
-            accountsToSync.Length, tenantId)
+        // 2. Fetch accounts from Akoya FDX
+        let! accounts =
+            task {
+                try
+                    return! client.FetchAccountsAsync(customerId, institutionId, accessToken)
+                with ex ->
+                    logger.LogError(ex, "Failed to fetch accounts from Akoya for connection={ConnectionId}", connectionId)
+                    akoyaError <- true
+                    akoyaErrorMessage <- ex.Message
+                    return []
+            }
 
-        // 3. Fetch transactions for each account and normalize
-        let mutable allNormalized : NormalizedTransaction list = []
-
-        for account in accountsToSync do
-            let! txns = client.FetchTransactionsAsync("stub-access-token", account.AccountId)
-            let normalized = txns |> List.map AkoyaNormalization.normalize
-            allNormalized <- allNormalized @ normalized
-            logger.LogInformation(
-                "Fetched {TxnCount} transactions for account={AccountId}",
-                txns.Length, account.AccountId)
-
-        // 4. Upsert transactions to Core API
-        let! upsertResult = InternalApiClient.postTransactionsUpsert http tenantId syncEventIdOpt allNormalized
-
-        let mutable upsertedCount = 0
-        let mutable upsertFailed = false
-
-        match upsertResult with
-        | Ok json ->
-            try
-                use doc = JsonDocument.Parse(json)
-                let created =
-                    match doc.RootElement.TryGetProperty("created") with
-                    | true, p -> p.GetInt32()
-                    | _ -> 0
-                let updated =
-                    match doc.RootElement.TryGetProperty("updated") with
-                    | true, p -> p.GetInt32()
-                    | _ -> 0
-                upsertedCount <- created + updated
-            with _ ->
-                upsertedCount <- allNormalized.Length
-        | Error msg ->
-            logger.LogError("Failed to upsert transactions: {Message}", msg)
-            upsertFailed <- true
+        if akoyaError then
+            // Update connection status and return error
+            let status =
+                if akoyaErrorMessage.Contains("401") then "needsreauth"
+                else "error"
+            let! _ = InternalApiClient.postConnectionStatus http connectionId status (Some akoyaErrorMessage)
             ctx.Response.StatusCode <- 502
-            do! Response.ofJson {| error = "Core API upsert failed"; detail = msg |} ctx
+            do! Response.ofJson {| error = "Akoya FDX request failed"; detail = akoyaErrorMessage |} ctx
+        else
 
-        if not upsertFailed then
-            // 5. Complete sync event (optional — endpoint may not exist yet)
-            match syncEventIdOpt with
-            | Some syncEventId ->
-                let! completeResult =
-                    InternalApiClient.patchSyncEventComplete http syncEventId "completed" upsertedCount 0
-                match completeResult with
-                | Ok () -> ()
-                | Error msg -> logger.LogWarning("Failed to record sync completion: {Message}", msg)
-            | None -> ()
+            let accountsToSync =
+                match accountIdOpt with
+                | Some accountId -> accounts |> List.filter (fun a -> a.AccountId = accountId)
+                | None -> accounts
 
-            let response =
-                {|
-                    status = "completed"
-                    accountsFetched = accountsToSync.Length
-                    transactionsFetched = allNormalized.Length
-                    transactionsUpserted = upsertedCount
-                |}
-            do! Response.ofJson response ctx
+            // Filter to only accounts that are linked in Steward
+            let mappedAccounts =
+                accountsToSync
+                |> List.choose (fun a ->
+                    match Map.tryFind a.AccountId externalToLocalMap with
+                    | Some localId -> Some(a, localId)
+                    | None ->
+                        logger.LogWarning("Skipping unlinked Akoya account {AccountId}", a.AccountId)
+                        None)
+
+            logger.LogInformation(
+                "Fetched {FetchedCount} accounts from Akoya; {MappedCount} mapped to local accounts for tenant={TenantId}",
+                accountsToSync.Length, mappedAccounts.Length, tenantId)
+
+            // 3. Fetch transactions for each mapped account and normalize
+            let mutable allNormalized : NormalizedTransaction list = []
+            let mutable fetchErrors = ResizeArray<string>()
+
+            for (account, localAccountId) in mappedAccounts do
+                let! txns =
+                    task {
+                        try
+                            return! client.FetchTransactionsAsync(customerId, institutionId, accessToken, account.AccountId)
+                        with ex ->
+                            logger.LogError(ex, "Failed to fetch transactions for account={AccountId}", account.AccountId)
+                            fetchErrors.Add($"Account {account.AccountId}: {ex.Message}")
+                            return []
+                    }
+
+                let normalized =
+                    txns
+                    |> List.map (fun t ->
+                        { AkoyaNormalization.normalize t with
+                            AccountId = localAccountId.ToString() })
+
+                allNormalized <- allNormalized @ normalized
+                logger.LogInformation(
+                    "Fetched {TxnCount} transactions for account={AccountId} (local={LocalAccountId})",
+                    txns.Length, account.AccountId, localAccountId)
+
+            // 4. Upsert transactions to Core API
+            if allNormalized.IsEmpty && fetchErrors.Count > 0 then
+                let status = if fetchErrors |> Seq.exists (fun e -> e.Contains("401")) then "needsreauth" else "error"
+                let detail = String.Join("; ", fetchErrors)
+                let! _ = InternalApiClient.postConnectionStatus http connectionId status (Some detail)
+                ctx.Response.StatusCode <- 502
+                do! Response.ofJson {| error = "Failed to fetch transactions from Akoya"; detail = detail |} ctx
+            else
+                let! upsertResult = InternalApiClient.postTransactionsUpsert http tenantId syncEventIdOpt allNormalized
+
+                let mutable upsertedCount = 0
+                let mutable upsertFailed = false
+
+                match upsertResult with
+                | Ok json ->
+                    try
+                        use doc = JsonDocument.Parse(json)
+                        let created =
+                            match doc.RootElement.TryGetProperty("created") with
+                            | true, p -> p.GetInt32()
+                            | _ -> 0
+                        let updated =
+                            match doc.RootElement.TryGetProperty("updated") with
+                            | true, p -> p.GetInt32()
+                            | _ -> 0
+                        upsertedCount <- created + updated
+                    with _ ->
+                        upsertedCount <- allNormalized.Length
+                | Error msg ->
+                    logger.LogError("Failed to upsert transactions: {Message}", msg)
+                    upsertFailed <- true
+                    ctx.Response.StatusCode <- 502
+                    do! Response.ofJson {| error = "Core API upsert failed"; detail = msg |} ctx
+
+                if not upsertFailed then
+                    // 5. Complete sync event (optional — endpoint may not exist yet)
+                    match syncEventIdOpt with
+                    | Some syncEventId ->
+                        let statusStr = if fetchErrors.Count > 0 then "partial" else "completed"
+                        let! completeResult =
+                            InternalApiClient.patchSyncEventComplete http syncEventId statusStr upsertedCount 0
+                        match completeResult with
+                        | Ok () -> ()
+                        | Error msg -> logger.LogWarning("Failed to record sync completion: {Message}", msg)
+                    | None -> ()
+
+                    // Update connection status if there were fetch errors
+                    if fetchErrors.Count > 0 then
+                        let detail = String.Join("; ", fetchErrors)
+                        let! _ = InternalApiClient.postConnectionStatus http connectionId "error" (Some detail)
+                        ()
+
+                    let response =
+                        {|
+                            status = if fetchErrors.Count > 0 then "partial" else "completed"
+                            accountsFetched = mappedAccounts.Length
+                            transactionsFetched = allNormalized.Length
+                            transactionsUpserted = upsertedCount
+                            errors = if fetchErrors.Count > 0 then Some(fetchErrors |> Seq.toList) else None
+                        |}
+                    do! Response.ofJson response ctx
     }
 
 // ── Application bootstrap ────────────────────────────────────────────────────
@@ -283,7 +399,7 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{config.Port}") |> ignore
 builder.Services.AddSingleton<HttpClient>(new HttpClient()) |> ignore
 builder.Services.AddSingleton<IAkoyaClient>(fun sp ->
     let http = sp.GetRequiredService<HttpClient>()
-    StubAkoyaClient(config, http) :> IAkoyaClient) |> ignore
+    AkoyaFdxHttpClient(config, http) :> IAkoyaClient) |> ignore
 
 let wapp = builder.Build()
 
@@ -291,9 +407,11 @@ wapp.UseRouting()
     .UseFalco([
         get "/health" healthHandler
         post "/sync-trigger" (requireServiceToken (fun ctx ->
-            let client = ctx.RequestServices.GetRequiredService<IAkoyaClient>()
             let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+            let client = ctx.RequestServices.GetRequiredService<IAkoyaClient>()
             let logger = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("AkoyaSync")
-            (syncTriggerHandler client http logger) ctx))
+            // Pass the client directly; the handler needs a factory to create per-request clients
+            // but since the real client doesn't need per-request params, we can use it directly
+            (syncTriggerHandler (fun _ -> client) http logger) ctx))
     ])
     .Run(Response.ofPlainText "Not found")

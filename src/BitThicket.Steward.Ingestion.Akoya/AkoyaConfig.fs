@@ -14,6 +14,8 @@ type AkoyaConfig = {
     ClientSecret: string
     /// Akoya environment: "sandbox" or "production".
     Env: string
+    /// Optional override for the Akoya FDX API base URL.
+    FdxBaseUrl: string option
     /// Port to bind the HTTP server on.
     Port: string
 }
@@ -36,11 +38,18 @@ module AkoyaConfig =
             ClientId = require "AKOYA_CLIENT_ID"
             ClientSecret = require "AKOYA_CLIENT_SECRET"
             Env = optional "AKOYA_ENV" "sandbox"
+            FdxBaseUrl =
+                match Environment.GetEnvironmentVariable("AKOYA_FDX_BASE_URL") with
+                | null | "" -> None
+                | v -> Some v
             Port = optional "PORT" "8080"
         }
 
     /// Derives the Akoya FDX base URL from the environment flag.
     let fdxBaseUrl (config: AkoyaConfig) =
-        match config.Env.ToLowerInvariant() with
-        | "production" -> "https://api.akoya.com"
-        | _ -> "https://sandbox-idp.akoya.com"
+        match config.FdxBaseUrl with
+        | Some url -> url
+        | None ->
+            match config.Env.ToLowerInvariant() with
+            | "production" -> "https://api.akoya.com"
+            | _ -> "https://sandbox-api.akoya.com"
