@@ -14,6 +14,10 @@
     <Compile Include="CategoryRepository.fs" />
     <Compile Include="TransactionRepository.fs" />
     <Compile Include="TransactionMatcher.fs" />
+    <Compile Include="TransactionSplitRepository.fs" />
+    <Compile Include="AttachmentStorage.fs" />
+    <Compile Include="AttachmentRepository.fs" />
+    <Compile Include="SplitAttachmentEndpoints.fs" />
     <Compile Include="TransactionEndpoints.fs" />
     <Compile Include="ReconciliationRepository.fs" />
     <Compile Include="VaultService.fs" />
@@ -29,6 +33,7 @@
     <Compile Include="RemediationAttemptRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
+    <Compile Include="ExportEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
     <Compile Include="CategoryEndpoints.fs" />
     <Compile Include="ReconciliationEndpoints.fs" />
