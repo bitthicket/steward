@@ -30,6 +30,7 @@
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
+    <Compile Include="CategoryEndpoints.fs" />
     <Compile Include="ReconciliationEndpoints.fs" />
     <Compile Include="UserPreferencesEndpoints.fs" />
     <Compile Include="ConnectionEndpoints.fs" />
