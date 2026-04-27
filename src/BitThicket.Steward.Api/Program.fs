@@ -61,6 +61,18 @@ builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
 TenantContextServices.register builder.Services |> ignore
 AuthServices.register builder.Services { JwtSecret = jwtSecret; JwtSecretPrevious = jwtSecretPrevious; Issuer = jwtIssuer; Audience = jwtAudience } |> ignore
 builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
+builder.Services.AddSingleton<IBudgetRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    BudgetRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IBudgetPeriodRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    BudgetPeriodRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<ICategoryRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    CategoryRepository.create factory accessor) |> ignore
 let sharedHttpClient = new System.Net.Http.HttpClient()
 builder.Services.AddSingleton<IPriceProvider>(fun sp ->
     let db = sp.GetRequiredService<NpgsqlDataSource>()
@@ -123,6 +135,26 @@ wapp.UseRouting()
         post "/auth/login" Auth.loginHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
+        post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
+        get "/api/budgets/{budgetId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            BudgetEndpoints.getBudgetHandler budgetId ctx))
+        post "/api/budgets/{budgetId:guid}/periods" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            BudgetEndpoints.createPeriodHandler budgetId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/{periodId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            BudgetEndpoints.getPeriodHandler budgetId periodId ctx))
+        patch "/api/budgets/{budgetId:guid}/periods/{periodId:guid}/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            BudgetEndpoints.updateAllocationHandler budgetId periodId categoryId ctx))
+        post "/api/budgets/{budgetId:guid}/periods/{periodId:guid}/close" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            BudgetEndpoints.closePeriodHandler budgetId periodId ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
     ])
