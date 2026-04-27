@@ -366,6 +366,50 @@ type TransactionRepositoryTests() =
         }
 
     [<Fact>]
+    member _.``Split sum-to-parent invariant rejects violating inserts``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let tenantId = Guid.NewGuid()
+            let userId = Guid.NewGuid()
+            let accountId = Guid.NewGuid()
+            use seedConn = dataSource.OpenConnection()
+            seedTenantAndUser seedConn tenantId userId
+            seedAccount seedConn tenantId userId accountId "Checking"
+
+            // Insert a transaction for $100.00 (10000 minor USD)
+            let txn = { (makeTransaction tenantId accountId 100.00m) with Amount = { Amount = 100.00m; CurrencyCode = "USD" } }
+            let repo = makeRepo factory (makeContext tenantId userId)
+            let! _ = repo.CreateAsync(txn)
+
+            // Attempt to insert splits that sum to $60.00 (should fail)
+            use! conn = factory.OpenForTenantAsync({ TenantId = tenantId; UserId = userId })
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """INSERT INTO transaction_splits (id, tenant_id, transaction_id, amount_minor, currency, source, sort_order, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())"""
+            cmd.Parameters.AddWithValue("$1", Guid.NewGuid()) |> ignore
+            cmd.Parameters.AddWithValue("$2", tenantId) |> ignore
+            cmd.Parameters.AddWithValue("$3", txn.Id) |> ignore
+            cmd.Parameters.AddWithValue("$4", 6000L) |> ignore  // $60.00
+            cmd.Parameters.AddWithValue("$5", "USD") |> ignore
+            let sourceParam = cmd.CreateParameter()
+            sourceParam.ParameterName <- "$6"
+            sourceParam.NpgsqlDbType <- NpgsqlTypes.NpgsqlDbType.Jsonb
+            sourceParam.Value <- box """{"type":"manual"}"""
+            cmd.Parameters.Add(sourceParam) |> ignore
+            cmd.Parameters.AddWithValue("$7", 0) |> ignore
+
+            let! ex = Assert.ThrowsAsync<PostgresException>(fun () -> cmd.ExecuteNonQueryAsync() :> Task)
+            test <@ ex.SqlState = "P0001" @>  // RAISException / trigger failure
+        }
+
+    [<Fact>]
     member _.``TransactionSource round-trips for Import``() =
         task {
             if not (canConnect ()) then return () else
