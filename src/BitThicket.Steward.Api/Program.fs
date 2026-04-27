@@ -77,6 +77,10 @@ builder.Services.AddSingleton<IApiKeyRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     ApiKeyRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAccountRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    AccountRepository.create factory accessor) |> ignore
 let sharedHttpClient = new System.Net.Http.HttpClient()
 builder.Services.AddSingleton<IPriceProvider>(fun sp ->
     let db = sp.GetRequiredService<NpgsqlDataSource>()
@@ -139,6 +143,18 @@ wapp.UseRouting()
         post "/auth/login" Auth.loginHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
+        // Accounts
+        get "/api/accounts" (AuthHelpers.requireAuth AccountEndpoints.listAccountsHandler)
+        get "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
+            AccountEndpoints.getAccountHandler accountId ctx))
+        post "/api/accounts" (AuthHelpers.requireAuth AccountEndpoints.createAccountHandler)
+        patch "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
+            AccountEndpoints.updateAccountHandler accountId ctx))
+        delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
+            AccountEndpoints.deleteAccountHandler accountId ctx))
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
         get "/api/budgets/{budgetId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid

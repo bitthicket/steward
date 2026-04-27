@@ -72,6 +72,7 @@ let private makeAccount (tenantId: Guid) (userId: Guid) (accountType: AccountTyp
         CreditCardInfo = None
         IsOnBudget = AccountRepository.defaultIsOnBudget accountType
         IsActive = true
+        DeletedAt = None
         CreatedAt = now
         UpdatedAt = now
     }
@@ -250,7 +251,7 @@ type AccountRepositoryTests() =
         }
 
     [<Fact>]
-    member _.``DeleteAsync removes an account``() =
+    member _.``DeleteAsync soft-deletes an account``() =
         task {
             if not (canConnect ()) then return () else
 
@@ -269,8 +270,16 @@ type AccountRepositoryTests() =
             let! _ = repo.CreateAsync(account)
             do! repo.DeleteAsync(account.Id)
 
+            // GetAsync should not return soft-deleted accounts
             let! retrieved = repo.GetAsync(account.Id)
             test <@ retrieved |> Option.isNone @>
+
+            // But the row should still exist with deleted_at set
+            use cmd = seedConn.CreateCommand()
+            cmd.CommandText <- "SELECT deleted_at FROM accounts WHERE id = $1"
+            cmd.Parameters.AddWithValue("$1", account.Id) |> ignore
+            let! deletedAt = cmd.ExecuteScalarAsync()
+            test <@ deletedAt <> null @>
         }
 
     [<Fact>]

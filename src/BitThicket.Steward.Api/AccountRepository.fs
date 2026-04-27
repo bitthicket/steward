@@ -37,15 +37,15 @@ module AccountRepository =
         | AccountType.Loan        -> "loan"
         | AccountType.Cash        -> "cash"
 
-    let private accountTypeFromString (s: string) : AccountType =
+    let accountTypeFromString (s: string) : AccountType option =
         match s.ToLowerInvariant() with
-        | "checking"    -> AccountType.Checking
-        | "savings"     -> AccountType.Savings
-        | "credit_card" -> AccountType.CreditCard
-        | "investment"  -> AccountType.Investment
-        | "loan"        -> AccountType.Loan
-        | "cash"        -> AccountType.Cash
-        | _             -> failwith $"Unknown account type: {s}"
+        | "checking"    -> Some AccountType.Checking
+        | "savings"     -> Some AccountType.Savings
+        | "credit_card" -> Some AccountType.CreditCard
+        | "investment"  -> Some AccountType.Investment
+        | "loan"        -> Some AccountType.Loan
+        | "cash"        -> Some AccountType.Cash
+        | _             -> None
 
     // ── JSON serialization (lives in repo, not domain) ───────────────────────
 
@@ -71,15 +71,16 @@ module AccountRepository =
             TenantId = reader.GetGuid(1)
             UserId = reader.GetGuid(2)
             Name = reader.GetString(3)
-            AccountType = accountTypeFromString (reader.GetString(4))
+            AccountType = accountTypeFromString (reader.GetString(4)) |> Option.get
             CurrencyCode = reader.GetString(5)
             InstitutionName = Sql.nullableString reader 6
             ExternalId = Sql.nullableString reader 7
             CreditCardInfo = creditCardInfoFromJsonb reader 8
             IsOnBudget = reader.GetBoolean(9)
             IsActive = reader.GetBoolean(10)
-            CreatedAt = Sql.dateTimeOffset reader 11
-            UpdatedAt = Sql.dateTimeOffset reader 12
+            DeletedAt = Sql.nullableDateTimeOffset reader 11
+            CreatedAt = Sql.dateTimeOffset reader 12
+            UpdatedAt = Sql.dateTimeOffset reader 13
         }
 
     // ── CRUD implementations ─────────────────────────────────────────────────
@@ -91,8 +92,8 @@ module AccountRepository =
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, name, account_type, currency,
                           institution_name, external_id, credit_card_info,
-                          is_on_budget, is_active, created_at, updated_at
-                   FROM accounts WHERE id = $1"""
+                          is_on_budget, is_active, deleted_at, created_at, updated_at
+                   FROM accounts WHERE id = $1 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
@@ -107,8 +108,9 @@ module AccountRepository =
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, name, account_type, currency,
                           institution_name, external_id, credit_card_info,
-                          is_on_budget, is_active, created_at, updated_at
+                          is_on_budget, is_active, deleted_at, created_at, updated_at
                    FROM accounts
+                   WHERE deleted_at IS NULL
                    ORDER BY created_at DESC"""
             let! reader = cmd.ExecuteReaderAsync()
             use reader = reader
@@ -127,8 +129,8 @@ module AccountRepository =
                 """INSERT INTO accounts (
                        id, tenant_id, user_id, name, account_type, currency,
                        institution_name, external_id, credit_card_info,
-                       is_on_budget, is_active, created_at, updated_at
-                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"""
+                       is_on_budget, is_active, deleted_at, created_at, updated_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"""
             cmd.Parameters.AddWithValue("$1", account.Id) |> ignore
             cmd.Parameters.AddWithValue("$2", account.TenantId) |> ignore
             cmd.Parameters.AddWithValue("$3", account.UserId) |> ignore
@@ -148,8 +150,11 @@ module AccountRepository =
             cmd.Parameters.Add(ccParam) |> ignore
             cmd.Parameters.AddWithValue("$10", account.IsOnBudget) |> ignore
             cmd.Parameters.AddWithValue("$11", account.IsActive) |> ignore
-            cmd.Parameters.AddWithValue("$12", account.CreatedAt.UtcDateTime) |> ignore
-            cmd.Parameters.AddWithValue("$13", account.UpdatedAt.UtcDateTime) |> ignore
+            match account.DeletedAt with
+            | Some d -> cmd.Parameters.AddWithValue("$12", d.UtcDateTime) |> ignore
+            | None -> cmd.Parameters.AddWithValue("$12", DBNull.Value) |> ignore
+            cmd.Parameters.AddWithValue("$13", account.CreatedAt.UtcDateTime) |> ignore
+            cmd.Parameters.AddWithValue("$14", account.UpdatedAt.UtcDateTime) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return account.Id
         }
@@ -169,8 +174,9 @@ module AccountRepository =
                        credit_card_info = $6,
                        is_on_budget = $7,
                        is_active = $8,
-                       updated_at = $9
-                   WHERE id = $10"""
+                       deleted_at = $9,
+                       updated_at = $10
+                   WHERE id = $11 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", account.Name) |> ignore
             cmd.Parameters.AddWithValue("$2", accountTypeToString account.AccountType) |> ignore
             cmd.Parameters.AddWithValue("$3", account.CurrencyCode) |> ignore
@@ -187,8 +193,11 @@ module AccountRepository =
             cmd.Parameters.Add(ccParam) |> ignore
             cmd.Parameters.AddWithValue("$7", account.IsOnBudget) |> ignore
             cmd.Parameters.AddWithValue("$8", account.IsActive) |> ignore
-            cmd.Parameters.AddWithValue("$9", DateTimeOffset.UtcNow.UtcDateTime) |> ignore
-            cmd.Parameters.AddWithValue("$10", account.Id) |> ignore
+            match account.DeletedAt with
+            | Some d -> cmd.Parameters.AddWithValue("$9", d.UtcDateTime) |> ignore
+            | None -> cmd.Parameters.AddWithValue("$9", DBNull.Value) |> ignore
+            cmd.Parameters.AddWithValue("$10", DateTimeOffset.UtcNow.UtcDateTime) |> ignore
+            cmd.Parameters.AddWithValue("$11", account.Id) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()
         }
@@ -197,7 +206,10 @@ module AccountRepository =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
             use cmd = conn.CreateCommand()
-            cmd.CommandText <- "DELETE FROM accounts WHERE id = $1"
+            cmd.CommandText <-
+                """UPDATE accounts
+                   SET deleted_at = now()
+                   WHERE id = $1 AND deleted_at IS NULL"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()

@@ -119,6 +119,9 @@ type Account = {
     /// but the user can override.
     IsOnBudget: bool
     IsActive: bool
+    /// Soft-delete timestamp. When Some the account is logically deleted and
+    /// excluded from list/get results, but transaction history remains intact.
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }

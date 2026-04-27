@@ -425,7 +425,7 @@ type AuthTests() =
             let token = regDoc.RootElement.GetProperty("accessToken").GetString()
 
             let httpCtx = createHttpContextWithAuth factory token
-            let middleware = TenantContextMiddleware(RequestDelegate(fun _ -> Task.CompletedTask), testAuthConfig)
+            let middleware = TenantContextMiddleware(RequestDelegate(fun _ -> Task.CompletedTask), testAuthConfig, factory)
             do! middleware.InvokeAsync(httpCtx)
 
             Assert.True(httpCtx.Items.ContainsKey("TenantContext"))
