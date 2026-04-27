@@ -233,25 +233,39 @@ type TenantContextMiddleware(next: RequestDelegate, authConfig: AuthConfig, dbFa
                 | true, el when el.ValueKind = JsonValueKind.String -> Some(el.GetString())
                 | _ -> None
 
-            // Try Bearer token first
-            match ctx.Request.Headers.TryGetValue("Authorization") with
-            | true, values when values.Count > 0 ->
-                let header = values.[0]
-                if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
-                    let token = header.Substring(7)
-                    match Jwt.tryReadToken authConfig.JwtSecret authConfig.JwtSecretPrevious authConfig.Issuer authConfig.Audience token with
-                    | Jwt.ValidationResult.Valid jwtDoc ->
-                        match tryGetStringClaim jwtDoc "sub", tryGetStringClaim jwtDoc "tid" with
-                        | Some subStr, Some tidStr ->
-                            match tryParseGuid subStr, tryParseGuid tidStr with
-                            | Some userId, Some tenantId ->
-                                let role = tryGetStringClaim jwtDoc "mr" |> Option.defaultValue ""
-                                ctx.Items["TenantContext"] <- { TenantId = tenantId; UserId = userId }
-                                ctx.Items["TenantRole"] <- role
-                            | _ -> ()
+            let tokenOpt =
+                match ctx.Request.Headers.TryGetValue("Authorization") with
+                | true, values when values.Count > 0 ->
+                    let header = values.[0]
+                    if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
+                        Some(header.Substring(7))
+                    else None
+                | _ -> None
+
+            let tokenOpt =
+                match tokenOpt with
+                | Some t -> Some t
+                | None ->
+                    match ctx.Request.Cookies.TryGetValue("steward_auth") with
+                    | true, cookieValue when not (String.IsNullOrWhiteSpace(cookieValue)) ->
+                        Some cookieValue
+                    | _ -> None
+
+            match tokenOpt with
+            | Some token ->
+                match Jwt.tryReadToken authConfig.JwtSecret authConfig.JwtSecretPrevious authConfig.Issuer authConfig.Audience token with
+                | Jwt.ValidationResult.Valid jwtDoc ->
+                    match tryGetStringClaim jwtDoc "sub", tryGetStringClaim jwtDoc "tid" with
+                    | Some subStr, Some tidStr ->
+                        match tryParseGuid subStr, tryParseGuid tidStr with
+                        | Some userId, Some tenantId ->
+                            let role = tryGetStringClaim jwtDoc "mr" |> Option.defaultValue ""
+                            ctx.Items["TenantContext"] <- { TenantId = tenantId; UserId = userId }
+                            ctx.Items["TenantRole"] <- role
                         | _ -> ()
                     | _ -> ()
-            | _ -> ()
+                | _ -> ()
+            | None -> ()
 
             // Fall back to API key auth if no tenant context was set
             if not (ctx.Items.ContainsKey("TenantContext")) then
@@ -286,6 +300,29 @@ module private AuthJson =
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 module Auth =
+
+    // POST /api/auth/cookie-set
+    let cookieSetHandler : HttpHandler = fun ctx ->
+        task {
+            let! doc = AuthJson.readBody ctx
+            let accessToken =
+                match doc.RootElement.TryGetProperty("accessToken") with
+                | true, el when el.ValueKind = JsonValueKind.String -> el.GetString()
+                | _ -> ""
+            let cookieOptions =
+                let opts = CookieOptions()
+                opts.HttpOnly <- true
+                opts.SameSite <- SameSiteMode.Lax
+                opts.Secure <- ctx.Request.IsHttps
+                opts.Path <- "/"
+                if String.IsNullOrEmpty(accessToken) then
+                    opts.Expires <- DateTimeOffset.UnixEpoch
+                else
+                    opts.Expires <- DateTimeOffset.UtcNow.AddHours(1.0)
+                opts
+            ctx.Response.Cookies.Append("steward_auth", accessToken, cookieOptions)
+            do! Response.ofJson {| ok = true |} ctx
+        }
 
     // POST /auth/register
     let registerHandler : HttpHandler = fun ctx ->

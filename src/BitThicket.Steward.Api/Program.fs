@@ -9,7 +9,9 @@ open Falco
 open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
+open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.FileProviders
 open Microsoft.Extensions.Logging
 open Npgsql
 open BitThicket.Steward.Api
@@ -616,6 +618,17 @@ let plaidWebhookHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson {| status = "ignored"; webhookType = webhookType; webhookCode = webhookCode |} ctx
     }
 
+// ── Static files (portal SPA) ────────────────────────────────────────────────
+
+let portalPath = Path.Combine(wapp.Environment.WebRootPath, "portal")
+if Directory.Exists(portalPath) then
+    wapp.UseStaticFiles(
+        new StaticFileOptions(
+            RequestPath = PathString("/portal"),
+            FileProvider = new PhysicalFileProvider(portalPath)
+        )
+    ) |> ignore
+
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
@@ -626,6 +639,7 @@ wapp.UseRouting()
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
         post "/auth/register" Auth.registerHandler
         post "/auth/login" Auth.loginHandler
+        post "/api/auth/cookie-set" Auth.cookieSetHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
         // Accounts
@@ -725,5 +739,18 @@ wapp.UseRouting()
             Auth.revokeApiKeyHandler keyId ctx))
         // MCP server route group
         post "/mcp" (AuthHelpers.requireAuth McpServer.mcpHandler)
+        // SPA fallthrough for portal routes
+        get "/portal/{*path}" (fun ctx ->
+            let indexPath = Path.Combine(portalPath, "index.html")
+            if File.Exists(indexPath) then
+                task {
+                    ctx.Response.ContentType <- "text/html"
+                    let! bytes = File.ReadAllBytesAsync(indexPath)
+                    do! ctx.Response.Body.WriteAsync(bytes, 0, bytes.Length)
+                }
+            else
+                ctx.Response.StatusCode <- 404
+                Response.ofPlainText "Portal not built" ctx
+        )
     ])
     .Run(Response.ofPlainText "Not found")
