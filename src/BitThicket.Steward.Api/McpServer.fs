@@ -420,23 +420,19 @@ module McpServer =
             currentPeriod = currentPeriod
         |}
 
-    let private categoryToResponse (category: Category) =
-        {|
+    let private categoryToResponse (category: Category) : CategoryResponse =
+        {
             id = category.Id
             name = category.Name
-            parentCategoryId = category.ParentCategoryId
+            parentId = category.ParentCategoryId
             isSystem = category.IsSystem
+            currency = category.CurrencyCode
+            rolloverEnabled = category.RolloverEnabled
             createdAt = category.CreatedAt
-        |}
+            updatedAt = category.UpdatedAt
+        }
 
-    type CategoryTreeNode = {
-        id: Guid
-        name: string
-        isSystem: bool
-        children: CategoryTreeNode list
-    }
-
-    let private buildCategoryTree (categories: Category list) =
+    let private buildCategoryTree (categories: Category list) : CategoryTreeNode list =
         let byParent = categories |> List.groupBy (fun c -> c.ParentCategoryId) |> Map.ofList
         let rec buildNode (cat: Category) =
             let children =
@@ -445,7 +441,14 @@ module McpServer =
                 |> Option.defaultValue []
                 |> List.sortBy (fun (c: Category) -> c.Name)
                 |> List.map buildNode
-            { id = cat.Id; name = cat.Name; isSystem = cat.IsSystem; children = children }
+            {
+                id = cat.Id
+                name = cat.Name
+                isSystem = cat.IsSystem
+                currency = cat.CurrencyCode
+                rolloverEnabled = cat.RolloverEnabled
+                children = children
+            }
         let roots =
             byParent
             |> Map.tryFind None
@@ -453,6 +456,76 @@ module McpServer =
             |> List.sortBy (fun (c: Category) -> c.Name)
             |> List.map buildNode
         roots
+
+    // ── Transaction response mapping (mirror public API shape) ───────────────
+
+    let private txnStatusToString (s: TransactionStatus) : string =
+        match s with
+        | TransactionStatus.Pending     -> "pending"
+        | TransactionStatus.NeedsReview -> "needsReview"
+        | TransactionStatus.Cleared     -> "cleared"
+        | TransactionStatus.Reconciled  -> "reconciled"
+
+    let private txnSourceToString (s: TransactionSource) : string =
+        match s with
+        | TransactionSource.Manual -> "manual"
+        | TransactionSource.DataFeed provider -> $"dataFeed:{provider}"
+        | TransactionSource.Import format -> $"import:{format}"
+
+    let private splitToResponse (s: TransactionSplit) : SplitResponse =
+        {
+            id = s.Id
+            transactionId = s.TransactionId
+            amount = s.Amount.Amount
+            currency = s.Amount.CurrencyCode
+            categoryId = s.CategoryId
+            description = s.Description
+            memo = s.Memo
+            source =
+                match s.Source with
+                | SplitSource.Manual -> "manual"
+                | SplitSource.Receipt _ -> "receipt"
+                | SplitSource.Enrichment _ -> "enrichment"
+            sortOrder = s.SortOrder
+            createdAt = s.CreatedAt
+            updatedAt = s.UpdatedAt
+        }
+
+    let private attachmentToResponse (a: Attachment) : AttachmentResponse =
+        {
+            id = a.Id
+            transactionId = a.TransactionId
+            splitId = a.SplitId
+            kind =
+                match a.Kind with
+                | AttachmentKind.Receipt -> "receipt"
+                | AttachmentKind.Statement -> "statement"
+                | AttachmentKind.Other label -> $"other:{label}"
+            contentType = a.ContentType
+            sizeBytes = a.SizeBytes
+            uploadedAt = a.UploadedAt
+        }
+
+    let private txnToResponse (txn: Transaction) (splits: TransactionSplit list) (attachments: Attachment list) : TransactionResponse =
+        {
+            id = txn.Id
+            accountId = txn.AccountId
+            occurredAt = txn.OccurredAt
+            postedAt = txn.PostedAt
+            amount = txn.Amount.Amount
+            currency = txn.Amount.CurrencyCode
+            description = txn.Description
+            merchant = txn.Merchant
+            notes = txn.Memo
+            categoryId = txn.CategoryId
+            status = txnStatusToString txn.Status
+            source = txnSourceToString txn.Source
+            transferAccountId = txn.TransferAccountId
+            createdAt = txn.CreatedAt
+            updatedAt = txn.UpdatedAt
+            splits = splits |> List.map splitToResponse
+            attachments = attachments |> List.map attachmentToResponse
+        }
 
     let private handleResourcesRead (ctx: HttpContext) (id: JsonElement) (paramsEl: JsonElement) : JsonDocument =
         let uri =
@@ -496,24 +569,25 @@ module McpServer =
 
                     | ["transactions"] ->
                         let txnRepo = TransactionRepository.create factory accessor
-                        let txns = txnRepo.ListAsync().GetAwaiter().GetResult()
-                        let filtered =
-                            txns
-                            |> List.filter (fun t ->
-                                let accountFilter =
-                                    match query.TryFind "accountId" with
-                                    | Some aid -> match Guid.TryParse(aid) with true, g -> t.AccountId = g | _ -> true
-                                    | None -> true
-                                let fromFilter =
-                                    match query.TryFind "from" with
-                                    | Some f -> match DateTimeOffset.TryParse(f) with true, d -> t.OccurredAt >= d | _ -> true
-                                    | None -> true
-                                let toFilter =
-                                    match query.TryFind "to" with
-                                    | Some f -> match DateTimeOffset.TryParse(f) with true, d -> t.OccurredAt <= d | _ -> true
-                                    | None -> true
-                                accountFilter && fromFilter && toFilter)
-                        let resp = {| transactions = filtered |}
+                        let accountIdOpt = query.TryFind "accountId" |> Option.bind (fun s -> match Guid.TryParse(s) with true, g -> Some g | _ -> None)
+                        let fromOpt = query.TryFind "from" |> Option.bind (fun s -> match DateTimeOffset.TryParse(s) with true, d -> Some d | _ -> None)
+                        let toOpt = query.TryFind "to" |> Option.bind (fun s -> match DateTimeOffset.TryParse(s) with true, d -> Some d | _ -> None)
+                        let statusOpt = query.TryFind "status" |> Option.bind (fun s -> try Some (TransactionRepository.statusFromString s) with _ -> None)
+                        let limit = query.TryFind "limit" |> Option.bind (fun s -> match Int32.TryParse(s) with true, n -> Some (Math.Max(1, Math.Min(n, 250))) | _ -> None) |> Option.defaultValue 50
+
+                        let filter : TransactionListFilter = {
+                            AccountId = accountIdOpt
+                            From = fromOpt
+                            To = toOpt
+                            Status = statusOpt
+                            Limit = limit
+                            Cursor = None
+                        }
+                        let txns = txnRepo.ListAsync(filter).GetAwaiter().GetResult()
+                        let resp : TransactionListResponse = {
+                            items = txns |> List.map (fun txn -> txnToResponse txn [] [])
+                            nextCursor = None
+                        }
                         [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(resp, McpProtocol.jsonOptions)); blob = None } ]
 
                     | ["transactions"; idStr] ->
@@ -522,12 +596,17 @@ module McpServer =
                             [ { uri = uri; mimeType = Some "text/plain"; text = Some "Invalid transaction id"; blob = None } ]
                         | true, txnId ->
                             let txnRepo = TransactionRepository.create factory accessor
+                            let splitRepo = ctx.RequestServices.GetRequiredService<ITransactionSplitRepository>()
+                            let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
                             let txnOpt = txnRepo.GetAsync(txnId).GetAwaiter().GetResult()
                             match txnOpt with
                             | None ->
                                 [ { uri = uri; mimeType = Some "text/plain"; text = Some "Transaction not found"; blob = None } ]
                             | Some txn ->
-                                [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(txn, McpProtocol.jsonOptions)); blob = None } ]
+                                let splits = splitRepo.ListByTransactionAsync(txnId).GetAwaiter().GetResult()
+                                let attachments = attachmentRepo.ListByTransactionAsync(txnId).GetAwaiter().GetResult()
+                                let resp = txnToResponse txn splits attachments
+                                [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(resp, McpProtocol.jsonOptions)); blob = None } ]
 
                     | ["budgets"] ->
                         let budgetRepo = BudgetRepository.create factory accessor
