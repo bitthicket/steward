@@ -475,9 +475,9 @@ type FeedHealthLevel =
     | Unknown
 
 /// Coarse, computed projection of feed connection health. See ADR-011.
-/// Placeholder shape — full evaluation rules live with the remediation flow.
 type FeedHealth = {
     ConnectionId: Guid
+    TenantId: Guid
     Level: FeedHealthLevel
     LastSuccessAt: DateTimeOffset option
     LastFailureAt: DateTimeOffset option

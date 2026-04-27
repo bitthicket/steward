@@ -11,6 +11,7 @@ open BitThicket.Steward.Api.Domain
 type ISyncEventRepository =
     abstract CreateAsync : syncEvent:SyncEvent -> Task<Guid>
     abstract GetAsync : id:Guid -> Task<SyncEvent option>
+    abstract ListForConnectionAsync : connectionId:Guid -> Task<SyncEvent list>
 
 module SyncEventRepository =
 
@@ -102,6 +103,26 @@ module SyncEventRepository =
             return if hasRow then Some(mapSyncEvent reader) else None
         }
 
+    let listForConnectionAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (connectionId: Guid) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, connection_id, started_at, completed_at,
+                          status, transactions_added, transactions_updated
+                   FROM sync_events
+                   WHERE connection_id = $1
+                   ORDER BY started_at DESC
+                   LIMIT 100"""
+            cmd.Parameters.AddWithValue("$1", connectionId) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let results = ResizeArray<SyncEvent>()
+            while! reader.ReadAsync() do
+                results.Add(mapSyncEvent reader)
+            return results |> Seq.toList
+        }
+
     let create (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) : ISyncEventRepository =
         let requireCtx () =
             match accessor.Context with
@@ -111,4 +132,5 @@ module SyncEventRepository =
         { new ISyncEventRepository with
             member _.CreateAsync(syncEvent) = createAsync factory syncEvent
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
+            member _.ListForConnectionAsync(connectionId) = listForConnectionAsync factory (requireCtx()) connectionId
         }

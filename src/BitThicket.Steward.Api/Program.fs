@@ -116,6 +116,18 @@ builder.Services.AddScoped<IDataFeedConnectionRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     DataFeedConnectionRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<ISyncEventRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    SyncEventRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IFeedHealthRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    FeedHealthRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IRemediationAttemptRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    RemediationAttemptRepository.create factory accessor) |> ignore
 builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let config = PlaidConfig.fromEnvironment()
     let http = sp.GetRequiredService<HttpClient>()
@@ -124,6 +136,7 @@ builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let log = sp.GetRequiredService<ILogger<PlaidService>>()
     PlaidService(config, http, factory, vault, log) :> IPlaidService) |> ignore
 builder.Services.AddHostedService<PricingWorker>() |> ignore
+builder.Services.AddHostedService<FeedHealthWorker>() |> ignore
 
 let wapp = builder.Build()
 
@@ -593,6 +606,17 @@ wapp.UseRouting()
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Connections
+        get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
+        get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.healthHistoryHandler connectionId ctx))
+        post "/api/connections/{connectionId:guid}/remediation-attempts" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.createRemediationAttemptHandler connectionId ctx))
+        patch "/api/remediation-attempts/{attemptId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attemptId = ctx.Request.RouteValues.["attemptId"] :?> Guid
+            ConnectionEndpoints.updateRemediationAttemptHandler attemptId ctx))
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler

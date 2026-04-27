@@ -21,6 +21,9 @@
     <Compile Include="BudgetRepositoryTests.fs" />
     <Compile Include="BudgetPeriodRepositoryTests.fs" />
     <Compile Include="DataFeedConnectionRepositoryTests.fs" />
+    <Compile Include="FeedHealthWorkerTests.fs" />
+    <Compile Include="RemediationAttemptRepositoryTests.fs" />
+    <Compile Include="ConnectionEndpointsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

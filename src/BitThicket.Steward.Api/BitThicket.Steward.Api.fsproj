@@ -15,16 +15,21 @@
     <Compile Include="TransactionMatcher.fs" />
     <Compile Include="VaultService.fs" />
     <Compile Include="DataFeedConnectionRepository.fs" />
+    <Compile Include="SyncEventRepository.fs" />
     <Compile Include="PlaidService.fs" />
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
     <Compile Include="ApiKeyRepository.fs" />
+    <Compile Include="FeedHealthRepository.fs" />
+    <Compile Include="RemediationAttemptRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
+    <Compile Include="ConnectionEndpoints.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="McpServer.fs" />
     <Compile Include="PricingWorker.fs" />
+    <Compile Include="FeedHealthWorker.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
