@@ -12,7 +12,8 @@ open System
 type User = {
     Id: Guid
     DisplayName: string
-    Email: string option
+    Email: string
+    PasswordHash: string
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }
@@ -501,4 +502,38 @@ type UserPreferences = {
     /// [15 minutes, 24 hours]; values outside that range are clamped.
     /// See ADR-005 for the rationale.
     PreferredSyncFrequency: TimeSpan
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenant
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Tenant = {
+    Id: Guid
+    OwnerUserId: Guid
+    DisplayName: string
+    DefaultCurrencyCode: string
+    CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding
+// ─────────────────────────────────────────────────────────────────────────────
+
+[<RequireQualifiedAccess>]
+type OnboardingStep =
+    | CreateAccount = 1
+    | CreateTenant = 2
+    | ConnectFirstFeed = 3
+    | SetInitialBudget = 4
+    | Done = 5
+
+type OnboardingState = {
+    TenantId: Guid
+    CurrentStep: int
+    StartedAt: DateTimeOffset
+    CompletedAt: DateTimeOffset option
+    CompletedSteps: int list
+    Skipped: bool
 }

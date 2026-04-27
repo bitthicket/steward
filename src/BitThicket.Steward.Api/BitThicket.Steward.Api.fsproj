@@ -5,11 +5,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Migrations\*.sql" />
     <Compile Include="Domain.fs" />
+    <Compile Include="Data.fs" />
+    <Compile Include="Routes.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Falco" Version="5.*" />
+    <PackageReference Include="Npgsql" Version="9.*" />
+    <PackageReference Include="dbup-postgresql" Version="6.*" />
   </ItemGroup>
 </Project>
