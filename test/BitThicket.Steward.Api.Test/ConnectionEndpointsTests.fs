@@ -74,6 +74,12 @@ let private createHttpContext (factory: IDbConnectionFactory) =
         let f = sp.GetRequiredService<IDbConnectionFactory>()
         let accessor = sp.GetRequiredService<ITenantContextAccessor>()
         RemediationAttemptRepository.create f accessor) |> ignore
+    services.AddSingleton<BitThicket.Steward.Api.Vault.IVaultService>(fun sp ->
+        BitThicket.Steward.Api.Vault.VaultService(factory) :> BitThicket.Steward.Api.Vault.IVaultService) |> ignore
+    services.AddSingleton<BitThicket.Steward.Api.IAccountRepository>(fun sp ->
+        let f = sp.GetRequiredService<IDbConnectionFactory>()
+        let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+        AccountRepository.create f accessor) |> ignore
     services.AddHttpContextAccessor() |> ignore
     services.AddScoped<ITenantContextAccessor, TenantContextAccessor>() |> ignore
     let provider = services.BuildServiceProvider()
@@ -400,4 +406,74 @@ type ConnectionEndpointsTests() =
             setJsonBody patchCtx """{"outcome":"resolved"}"""
             do! ConnectionEndpoints.updateRemediationAttemptHandler (Guid.NewGuid()) patchCtx
             test <@ patchCtx.Response.StatusCode = 401 @>
+
+            let linkCtx = createHttpContext factory
+            do! ConnectionEndpoints.plaidLinkTokenHandler linkCtx
+            test <@ linkCtx.Response.StatusCode = 401 @>
+
+            let exchangeCtx = createHttpContext factory
+            setJsonBody exchangeCtx """{"publicToken":"x","institutionId":"ins_1","institutionName":"Test","accounts":[]}"""
+            do! ConnectionEndpoints.plaidExchangeHandler exchangeCtx
+            test <@ exchangeCtx.Response.StatusCode = 401 @>
+
+            let deleteCtx = createHttpContext factory
+            do! ConnectionEndpoints.deleteConnectionHandler (Guid.NewGuid()) deleteCtx
+            test <@ deleteCtx.Response.StatusCode = 401 @>
+
+            let reauthCtx = createHttpContext factory
+            do! ConnectionEndpoints.reauthConnectionHandler (Guid.NewGuid()) reauthCtx
+            test <@ reauthCtx.Response.StatusCode = 401 @>
+        }
+
+    [<Fact>]
+    member _.``POST /api/connections/plaid/exchange returns 400 for missing fields``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let! token = registerAndGetToken factory "plaidex@example.com"
+
+            // Missing publicToken
+            let ctx1 = createHttpContextWithAuth factory token
+            setJsonBody ctx1 """{"institutionId":"ins_1","institutionName":"Test","accounts":[{"id":"a1","name":"Checking","type":"depository"}]}"""
+            do! ConnectionEndpoints.plaidExchangeHandler ctx1
+            test <@ ctx1.Response.StatusCode = 400 @>
+
+            // Missing institutionId
+            let ctx2 = createHttpContextWithAuth factory token
+            setJsonBody ctx2 """{"publicToken":"pt_1","institutionName":"Test","accounts":[{"id":"a1","name":"Checking","type":"depository"}]}"""
+            do! ConnectionEndpoints.plaidExchangeHandler ctx2
+            test <@ ctx2.Response.StatusCode = 400 @>
+
+            // Empty accounts
+            let ctx3 = createHttpContextWithAuth factory token
+            setJsonBody ctx3 """{"publicToken":"pt_1","institutionId":"ins_1","institutionName":"Test","accounts":[]}"""
+            do! ConnectionEndpoints.plaidExchangeHandler ctx3
+            test <@ ctx3.Response.StatusCode = 400 @>
+        }
+
+    [<Fact>]
+    member _.``DELETE /api/connections/{id} returns 404 for cross-tenant``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let! tokenA = registerAndGetToken factory "ctdel@example.com"
+            let! tokenB = registerAndGetToken factory "ctdelb@example.com"
+            let regDocB = readResponseJson (createHttpContextWithAuth factory tokenB)
+            let tenantB = Guid.Parse(regDocB.RootElement.GetProperty("tenantId").GetString())
+
+            let connB = createConnection factory tenantB
+
+            let ctx = createHttpContextWithAuth factory tokenA
+            do! ConnectionEndpoints.deleteConnectionHandler connB.Id ctx
+            test <@ ctx.Response.StatusCode = 404 @>
         }

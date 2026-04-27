@@ -632,6 +632,15 @@ wapp.UseRouting()
         patch "/api/remediation-attempts/{attemptId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let attemptId = ctx.Request.RouteValues.["attemptId"] :?> Guid
             ConnectionEndpoints.updateRemediationAttemptHandler attemptId ctx))
+        // Plaid Link
+        post "/api/connections/plaid/link-token" (AuthHelpers.requireAuth ConnectionEndpoints.plaidLinkTokenHandler)
+        post "/api/connections/plaid/exchange" (AuthHelpers.requireAuth ConnectionEndpoints.plaidExchangeHandler)
+        delete "/api/connections/{connectionId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.deleteConnectionHandler connectionId ctx))
+        post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
