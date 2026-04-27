@@ -309,6 +309,7 @@ type McpResourcesTests() =
                 SyncEventId = None
                 PostedAt = Some DateTimeOffset.UtcNow
                 OccurredAt = DateTimeOffset.UtcNow
+                DeletedAt = None
                 CreatedAt = DateTimeOffset.UtcNow
                 UpdatedAt = DateTimeOffset.UtcNow
             }
@@ -347,7 +348,11 @@ type McpResourcesTests() =
                 Name = "Groceries"
                 ParentCategoryId = None
                 IsSystem = false
+                CurrencyCode = "USD"
+                RolloverEnabled = false
+                DeletedAt = None
                 CreatedAt = DateTimeOffset.UtcNow
+                UpdatedAt = DateTimeOffset.UtcNow
             }
             let! _ = catRepo.CreateAsync(category)
 
@@ -384,7 +389,11 @@ type McpResourcesTests() =
                 Name = "Food"
                 ParentCategoryId = None
                 IsSystem = false
+                CurrencyCode = "USD"
+                RolloverEnabled = false
+                DeletedAt = None
                 CreatedAt = DateTimeOffset.UtcNow
+                UpdatedAt = DateTimeOffset.UtcNow
             }
             let child = {
                 Id = Guid.NewGuid()
@@ -393,7 +402,11 @@ type McpResourcesTests() =
                 Name = "Groceries"
                 ParentCategoryId = Some parent.Id
                 IsSystem = false
+                CurrencyCode = "USD"
+                RolloverEnabled = false
+                DeletedAt = None
                 CreatedAt = DateTimeOffset.UtcNow
+                UpdatedAt = DateTimeOffset.UtcNow
             }
             let! _ = catRepo.CreateAsync(parent)
             let! _ = catRepo.CreateAsync(child)
@@ -493,7 +506,11 @@ type McpResourcesTests() =
                 Name = "Groceries"
                 ParentCategoryId = None
                 IsSystem = false
+                CurrencyCode = "USD"
+                RolloverEnabled = false
+                DeletedAt = None
                 CreatedAt = DateTimeOffset.UtcNow
+                UpdatedAt = DateTimeOffset.UtcNow
             }
             let! _ = catRepo.CreateAsync(category)
 

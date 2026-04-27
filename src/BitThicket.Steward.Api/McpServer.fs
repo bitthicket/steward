@@ -472,41 +472,7 @@ module McpServer =
         | TransactionSource.DataFeed provider -> $"dataFeed:{provider}"
         | TransactionSource.Import format -> $"import:{format}"
 
-    let private splitToResponse (s: TransactionSplit) : SplitResponse =
-        {
-            id = s.Id
-            transactionId = s.TransactionId
-            amount = s.Amount.Amount
-            currency = s.Amount.CurrencyCode
-            categoryId = s.CategoryId
-            description = s.Description
-            memo = s.Memo
-            source =
-                match s.Source with
-                | SplitSource.Manual -> "manual"
-                | SplitSource.Receipt _ -> "receipt"
-                | SplitSource.Enrichment _ -> "enrichment"
-            sortOrder = s.SortOrder
-            createdAt = s.CreatedAt
-            updatedAt = s.UpdatedAt
-        }
-
-    let private attachmentToResponse (a: Attachment) : AttachmentResponse =
-        {
-            id = a.Id
-            transactionId = a.TransactionId
-            splitId = a.SplitId
-            kind =
-                match a.Kind with
-                | AttachmentKind.Receipt -> "receipt"
-                | AttachmentKind.Statement -> "statement"
-                | AttachmentKind.Other label -> $"other:{label}"
-            contentType = a.ContentType
-            sizeBytes = a.SizeBytes
-            uploadedAt = a.UploadedAt
-        }
-
-    let private txnToResponse (txn: Transaction) (splits: TransactionSplit list) (attachments: Attachment list) : TransactionResponse =
+    let private txnToResponse (txn: Transaction) : TransactionResponse =
         {
             id = txn.Id
             accountId = txn.AccountId
@@ -523,8 +489,6 @@ module McpServer =
             transferAccountId = txn.TransferAccountId
             createdAt = txn.CreatedAt
             updatedAt = txn.UpdatedAt
-            splits = splits |> List.map splitToResponse
-            attachments = attachments |> List.map attachmentToResponse
         }
 
     let private handleResourcesRead (ctx: HttpContext) (id: JsonElement) (paramsEl: JsonElement) : JsonDocument =
@@ -585,7 +549,7 @@ module McpServer =
                         }
                         let txns = txnRepo.ListAsync(filter).GetAwaiter().GetResult()
                         let resp : TransactionListResponse = {
-                            items = txns |> List.map (fun txn -> txnToResponse txn [] [])
+                            items = txns |> List.map txnToResponse
                             nextCursor = None
                         }
                         [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(resp, McpProtocol.jsonOptions)); blob = None } ]
@@ -596,16 +560,12 @@ module McpServer =
                             [ { uri = uri; mimeType = Some "text/plain"; text = Some "Invalid transaction id"; blob = None } ]
                         | true, txnId ->
                             let txnRepo = TransactionRepository.create factory accessor
-                            let splitRepo = ctx.RequestServices.GetRequiredService<ITransactionSplitRepository>()
-                            let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
                             let txnOpt = txnRepo.GetAsync(txnId).GetAwaiter().GetResult()
                             match txnOpt with
                             | None ->
                                 [ { uri = uri; mimeType = Some "text/plain"; text = Some "Transaction not found"; blob = None } ]
                             | Some txn ->
-                                let splits = splitRepo.ListByTransactionAsync(txnId).GetAwaiter().GetResult()
-                                let attachments = attachmentRepo.ListByTransactionAsync(txnId).GetAwaiter().GetResult()
-                                let resp = txnToResponse txn splits attachments
+                                let resp = txnToResponse txn
                                 [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(resp, McpProtocol.jsonOptions)); blob = None } ]
 
                     | ["budgets"] ->
