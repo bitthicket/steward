@@ -930,6 +930,17 @@ wapp.UseRouting()
         get "/internal/connections/{connectionId:guid}/credentials" (requireServiceToken serviceToken internalConnectionCredentialsHandler)
         post "/internal/sync-trigger" syncTriggerHandler
         post "/webhooks/plaid" plaidWebhookHandler
+        get "/api/categories" (AuthHelpers.requireAuth (fun ctx ->
+            task {
+                let categoryRepo = ctx.RequestServices.GetRequiredService<ICategoryRepository>()
+                let! categories = categoryRepo.ListAsync()
+                let responses =
+                    categories
+                    |> List.map (fun c ->
+                        {| id = c.Id; name = c.Name; color = (None :> string option) |})
+                do! Response.ofJson {| categories = responses |} ctx
+            }))
+        get "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.listBudgetsHandler)
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
         get "/api/budgets/{budgetId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
@@ -970,6 +981,7 @@ wapp.UseRouting()
         get "/api/onboarding" (AuthHelpers.requireAuth getOnboardingHandler)
         patch "/api/onboarding" (AuthHelpers.requireAuth patchOnboardingHandler)
         // Reconciliations
+        get "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.listReconciliationsHandler)
         post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
         get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid

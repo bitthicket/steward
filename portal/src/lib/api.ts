@@ -4,10 +4,13 @@ import type {
 	Account,
 	Balance,
 	Transaction,
-	TransactionSplit,
-	Attachment,
 	DataFeedConnection,
-	Category
+	Category,
+	Budget,
+	BudgetCurrentPeriod,
+	BudgetReport,
+	Reconciliation,
+	ReconciliationWithTransactions
 } from './types';
 
 const API_BASE = '';
@@ -177,99 +180,13 @@ export async function deleteTransaction(id: string) {
 	return api<void>(`/api/transactions/${id}`, { method: 'DELETE' });
 }
 
-// ── Splits ─────────────────────────────────────────────────────────────────
-
-export async function listSplits(transactionId: string) {
-	return api<{ splits: TransactionSplit[] }>(`/api/transactions/${transactionId}/splits`);
-}
-
-export async function createSplit(
-	transactionId: string,
-	data: {
-		amountMinor: number;
-		currency: string;
-		categoryId?: string;
-		description?: string;
-		memo?: string;
-		sortOrder?: number;
-	}
-) {
-	return api<TransactionSplit>(`/api/transactions/${transactionId}/splits`, {
-		method: 'POST',
-		body: JSON.stringify(data)
-	});
-}
-
-export async function updateSplit(
-	transactionId: string,
-	splitId: string,
-	data: {
-		amountMinor?: number;
-		currency?: string;
-		categoryId?: string | null;
-		description?: string | null;
-		memo?: string | null;
-		sortOrder?: number;
-	}
-) {
-	return api<TransactionSplit>(`/api/transactions/${transactionId}/splits/${splitId}`, {
-		method: 'PATCH',
-		body: JSON.stringify(data)
-	});
-}
-
-export async function deleteSplit(transactionId: string, splitId: string) {
-	return api<void>(`/api/transactions/${transactionId}/splits/${splitId}`, { method: 'DELETE' });
-}
-
-// ── Attachments ────────────────────────────────────────────────────────────
-
-export async function listTransactionAttachments(transactionId: string) {
-	return api<{ attachments: Attachment[] }>(`/api/transactions/${transactionId}/attachments`);
-}
-
-export async function uploadTransactionAttachment(
-	transactionId: string,
-	file: File,
-	kind: string = 'other'
-) {
-	const form = new FormData();
-	form.append('file', file);
-	form.append('kind', kind);
-	return api<Attachment>(`/api/transactions/${transactionId}/attachments`, {
-		method: 'POST',
-		body: form
-	});
-}
-
-export async function uploadSplitAttachment(
-	transactionId: string,
-	splitId: string,
-	file: File,
-	kind: string = 'other'
-) {
-	const form = new FormData();
-	form.append('file', file);
-	form.append('kind', kind);
-	return api<Attachment>(`/api/transactions/${transactionId}/splits/${splitId}/attachments`, {
-		method: 'POST',
-		body: form
-	});
-}
-
-export function getAttachmentUrl(attachmentId: string) {
-	return `/api/attachments/${attachmentId}`;
-}
-
-export async function deleteAttachment(attachmentId: string) {
-	return api<void>(`/api/attachments/${attachmentId}`, { method: 'DELETE' });
-}
-
 // ── Connections ────────────────────────────────────────────────────────────
 
 export async function listConnections() {
 	return api<{ connections: DataFeedConnection[] }>('/api/connections');
 }
+
+// ── Categories ─────────────────────────────────────────────────────────────
 
 export async function listCategories() {
 	return api<{ categories: Category[] }>('/api/categories');
@@ -303,15 +220,12 @@ export async function patchOnboarding(data: {
 
 // ── Budgets ────────────────────────────────────────────────────────────────
 
-export interface Budget {
-	id: string;
-	name: string;
-	period: string;
-	currency: string;
-	style: string;
-	income: { amount: number; currencyCode: string } | null;
-	startsOn: string;
-	isActive: boolean;
+export async function listBudgets() {
+	return api<{ budgets: Budget[] }>('/api/budgets');
+}
+
+export async function getBudget(id: string) {
+	return api<Budget>(`/api/budgets/${id}`);
 }
 
 export async function createBudget(data: {
@@ -326,5 +240,94 @@ export async function createBudget(data: {
 		method: 'POST',
 		body: JSON.stringify(data)
 	});
+}
+
+export async function createPeriod(
+	budgetId: string,
+	data: { startDate: string; allocations: { categoryId: string; amountMinor: number }[] }
+) {
+	return api<BudgetCurrentPeriod>(`/api/budgets/${budgetId}/periods`, {
+		method: 'POST',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function updateAllocation(
+	budgetId: string,
+	periodId: string,
+	categoryId: string,
+	data: { amountMinor: number; rolloverEnabled?: boolean }
+) {
+	return api<{ success: boolean }>(
+		`/api/budgets/${budgetId}/periods/${periodId}/categories/${categoryId}`,
+		{
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		}
+	);
+}
+
+export async function closePeriod(budgetId: string, periodId: string) {
+	return api<{
+		closedPeriodId: string;
+		nextPeriodId: string;
+		rolloverBalances: { categoryId: string; rolloverAmountMinor: number; currency: string }[];
+	}>(`/api/budgets/${budgetId}/periods/${periodId}/close`, { method: 'POST' });
+}
+
+export async function getBudgetReport(budgetId: string, periodId: string, displayCurrency?: string) {
+	const qs = displayCurrency ? `?displayCurrency=${displayCurrency}` : '';
+	return api<BudgetReport>(`/api/budgets/${budgetId}/periods/${periodId}/report${qs}`);
+}
+
+export async function getCurrentBudgetReport(budgetId: string, displayCurrency?: string) {
+	const qs = displayCurrency ? `?displayCurrency=${displayCurrency}` : '';
+	return api<BudgetReport>(`/api/budgets/${budgetId}/periods/current/report${qs}`);
+}
+
+// ── Reconciliations ────────────────────────────────────────────────────────
+
+export async function listReconciliations() {
+	return api<{ reconciliations: Reconciliation[] }>('/api/reconciliations');
+}
+
+export async function getReconciliation(id: string) {
+	return api<ReconciliationWithTransactions>(`/api/reconciliations/${id}`);
+}
+
+export async function createReconciliation(data: {
+	accountId: string;
+	statementDate: string;
+	statementBalanceMinor: number;
+	currency: string;
+}) {
+	return api<{ reconciliation: Reconciliation; candidateTransactions: Transaction[] }>(
+		'/api/reconciliations',
+		{
+			method: 'POST',
+			body: JSON.stringify(data)
+		}
+	);
+}
+
+export async function updateReconciliationTransactions(
+	id: string,
+	data: { included: string[]; excluded: string[] }
+) {
+	return api<{ success: boolean }>(`/api/reconciliations/${id}/transactions`, {
+		method: 'PATCH',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function completeReconciliation(id: string, force = false) {
+	return api<{ status: string; diffMinor: number }>(
+		`/api/reconciliations/${id}/complete?force=${force}`,
+		{ method: 'POST' }
+	);
+}
+
+export async function abortReconciliation(id: string) {
+	return api<{ status: string }>(`/api/reconciliations/${id}/abort`, { method: 'POST' });
 }
 

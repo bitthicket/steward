@@ -186,7 +186,7 @@ type ReconciliationEndpointsTests() =
         }
 
     [<Fact>]
-    member _.``GET /api/reconciliations/{id} returns reconciliation with diff``() =
+    member _.``GET /api/reconciliations/{id} returns reconciliation with diff and candidates``() =
         task {
             if not (canConnect ()) then return () else
 
@@ -209,6 +209,9 @@ type ReconciliationEndpointsTests() =
             use seedConn = dataSource.OpenConnection()
             seedAccount seedConn tenantId userId accountId
 
+            let txn1 = Guid.NewGuid()
+            seedTransaction seedConn tenantId userId accountId txn1 100L (DateTimeOffset(2026, 4, 10, 0, 0, 0, TimeSpan.Zero)) "cleared"
+
             let createCtx = createHttpContextWithAuth factory token
             setJsonBody createCtx $"{{\"accountId\":\"{accountId}\",\"statementDate\":\"2026-04-15\",\"statementBalanceMinor\":100,\"currency\":\"USD\"}}"
             do! ReconciliationEndpoints.createReconciliationHandler createCtx
@@ -222,6 +225,9 @@ type ReconciliationEndpointsTests() =
             let doc = readResponseJson getCtx
             Assert.Equal(reconId.ToString(), doc.RootElement.GetProperty("id").GetString())
             test <@ doc.RootElement.GetProperty("diffMinor").GetInt64() = 0L @>
+            let candidates = doc.RootElement.GetProperty("candidateTransactions").EnumerateArray() |> Seq.toList
+            test <@ candidates.Length = 1 @>
+            Assert.Equal(txn1.ToString(), candidates.[0].GetProperty("id").GetString())
         }
 
     [<Fact>]

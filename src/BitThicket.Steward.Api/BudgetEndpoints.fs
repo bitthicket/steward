@@ -212,6 +212,31 @@ module private BudgetHelpers =
 module BudgetEndpoints =
     open BudgetHelpers
 
+    // GET /api/budgets
+    let listBudgetsHandler : HttpHandler = fun ctx ->
+        task {
+            let budgetRepo = ctx.RequestServices.GetRequiredService<IBudgetRepository>()
+            let periodRepo = ctx.RequestServices.GetRequiredService<IBudgetPeriodRepository>()
+            let! budgets = budgetRepo.ListAsync()
+            let! responses =
+                budgets
+                |> List.map (fun budget ->
+                    task {
+                        let! openPeriodOpt = periodRepo.GetOpenPeriodAsync(budget.Id)
+                        let! currentPeriodResp =
+                            match openPeriodOpt with
+                            | None -> Task.FromResult None
+                            | Some period ->
+                                task {
+                                    let! allocs = periodRepo.ListAllocationsByPeriodAsync(period.Id)
+                                    return Some (periodToResponse period allocs)
+                                }
+                        return budgetToResponse budget currentPeriodResp
+                    })
+                |> Task.WhenAll
+            do! Response.ofJson {| budgets = responses |> Array.toList |} ctx
+        }
+
     // POST /api/budgets
     let createBudgetHandler : HttpHandler = fun ctx ->
         task {

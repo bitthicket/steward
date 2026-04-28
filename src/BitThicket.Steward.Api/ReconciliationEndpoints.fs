@@ -48,6 +48,7 @@ type ReconciliationWithTransactionsResponse = {
     startedAt: DateTimeOffset
     completedAt: DateTimeOffset option
     includedTransactions: Transaction list
+    candidateTransactions: Transaction list
     diffMinor: int64
 }
 
@@ -108,6 +109,15 @@ module private ReconciliationHelpers =
 module ReconciliationEndpoints =
     open ReconciliationHelpers
 
+    // GET /api/reconciliations
+    let listReconciliationsHandler : HttpHandler = fun ctx ->
+        task {
+            let repo = ctx.RequestServices.GetRequiredService<IReconciliationRepository>()
+            let! recons = repo.ListAsync()
+            let responses = recons |> List.map reconToResponse
+            do! Response.ofJson {| reconciliations = responses |} ctx
+        }
+
     // POST /api/reconciliations
     let createReconciliationHandler : HttpHandler = fun ctx ->
         task {
@@ -160,6 +170,7 @@ module ReconciliationEndpoints =
                 ctx.Response.StatusCode <- 404
                 do! Response.ofJson {| error = "Reconciliation not found" |} ctx
             | Some (recon, txns) ->
+                let! candidates = repo.ListCandidateTransactionsAsync(recon.AccountId, recon.StatementDate)
                 let diffMinor = computeDiffMinor recon txns
                 let resp = {
                     id = recon.Id
@@ -173,6 +184,7 @@ module ReconciliationEndpoints =
                     startedAt = recon.StartedAt
                     completedAt = recon.CompletedAt
                     includedTransactions = txns
+                    candidateTransactions = candidates
                     diffMinor = diffMinor
                 }
                 do! Response.ofJson resp ctx

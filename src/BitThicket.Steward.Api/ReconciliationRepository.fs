@@ -11,6 +11,7 @@ type IReconciliationRepository =
     abstract CreateAsync : reconciliation:Reconciliation -> Task<Guid>
     abstract GetAsync : id:Guid -> Task<Reconciliation option>
     abstract GetWithTransactionsAsync : id:Guid -> Task<(Reconciliation * Transaction list) option>
+    abstract ListAsync : unit -> Task<Reconciliation list>
     abstract ListCandidateTransactionsAsync : accountId:Guid * statementDate:DateOnly -> Task<Transaction list>
     abstract UpdateIncludedTransactionsAsync : id:Guid * included:Guid list * excluded:Guid list -> Task<unit>
     abstract CompleteAsync : id:Guid * force:bool * note:string option -> Task<Result<int64, string>>
@@ -93,6 +94,22 @@ module ReconciliationRepository =
             use reader = reader
             let! hasRow = reader.ReadAsync()
             return if hasRow then Some(mapReconciliation reader) else None
+        }
+
+    let listAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, account_id, statement_date, statement_balance_minor,
+                          currency, status, note, created_by_user_id, started_at, completed_at
+                   FROM reconciliations ORDER BY started_at DESC"""
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let recons = ResizeArray<Reconciliation>()
+            while! reader.ReadAsync() do
+                recons.Add(mapReconciliation reader)
+            return recons |> Seq.toList
         }
 
     let getWithTransactionsAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (id: Guid) =
@@ -312,6 +329,7 @@ module ReconciliationRepository =
             member _.CreateAsync(recon) = createAsync factory recon
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
             member _.GetWithTransactionsAsync(id) = getWithTransactionsAsync factory (requireCtx()) id
+            member _.ListAsync() = listAsync factory (requireCtx())
             member _.ListCandidateTransactionsAsync(accountId, statementDate) = listCandidateTransactionsAsync factory (requireCtx()) (accountId, statementDate)
             member _.UpdateIncludedTransactionsAsync(id, included, excluded) = updateIncludedTransactionsAsync factory (requireCtx()) (id, included, excluded)
             member _.CompleteAsync(id, force, note) = completeAsync factory (requireCtx()) (id, force, note)
