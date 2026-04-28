@@ -394,7 +394,7 @@ module McpServer =
             id = period.Id
             startDate = period.StartDate.ToString("yyyy-MM-dd")
             endDate = period.EndDate.ToString("yyyy-MM-dd")
-            status = match period.Status with BudgetPeriodStatus.Open -> "open" | BudgetPeriodStatus.Closed -> "closed"
+            status = match period.Status with BudgetPeriodStatus.Open -> "Open" | BudgetPeriodStatus.Closed -> "Closed"
             allocations =
                 allocs
                 |> List.map (fun a -> {|
