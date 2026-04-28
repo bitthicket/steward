@@ -110,6 +110,17 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
+builder.Services.AddScoped<ITransactionSplitRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    TransactionSplitRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAttachmentStorage>(fun sp ->
+    let log = sp.GetRequiredService<ILogger<LocalAttachmentStorage>>()
+    AttachmentStorage.fromEnvironment log) |> ignore
+builder.Services.AddScoped<IAttachmentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    AttachmentRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -161,6 +172,10 @@ builder.Services.AddScoped<IUserPreferencesRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     UserPreferencesRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IOnboardingRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    OnboardingRepository.create factory accessor) |> ignore
 builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let config = PlaidConfig.fromEnvironment()
     let http = sp.GetRequiredService<HttpClient>()
@@ -228,6 +243,29 @@ let requireInt64 (el: JsonElement) (name: string) =
 let makeManualAccessor (tenantId: Guid) : ITenantContextAccessor =
     { new ITenantContextAccessor with
         member _.Context = Some { TenantId = tenantId; UserId = Guid.Empty } }
+
+let requireServiceToken (serviceToken: string option) (next: HttpHandler) : HttpHandler = fun ctx ->
+    task {
+        match serviceToken with
+        | None ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = "Service token not configured" |} ctx
+        | Some expected ->
+            let header =
+                match ctx.Request.Headers.TryGetValue("Authorization") with
+                | true, v when v.Count > 0 -> v.ToString()
+                | _ -> ""
+            let token =
+                if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
+                    header.Substring(7)
+                else
+                    ""
+            if token <> expected then
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            else
+                do! next ctx
+    }
 
 // ── Route handlers ─────────────────────────────────────────────────────────────
 
@@ -345,6 +383,69 @@ let resolveHandler : HttpHandler = fun ctx ->
             | _ ->
                 ctx.Response.StatusCode <- 400
                 do! Response.ofJson {| error = "Invalid action; expected 'accept' or 'reject'" |} ctx
+    }
+
+// GET /api/onboarding
+let getOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let tc = accessor.Context.Value
+        let! stateOpt = repo.GetAsync(tc.TenantId)
+        match stateOpt with
+        | None ->
+            ctx.Response.StatusCode <- 404
+            do! Response.ofJson {| error = "Onboarding state not found" |} ctx
+        | Some state ->
+            let respJson =
+                let n = System.Text.Json.Nodes.JsonObject()
+                n["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(state.TenantId.ToString())
+                n["currentStep"] <- System.Text.Json.Nodes.JsonValue.Create(state.CurrentStep)
+                n["startedAt"] <- System.Text.Json.Nodes.JsonValue.Create(state.StartedAt.ToString("O"))
+                match state.CompletedAt with
+                | Some dt -> n["completedAt"] <- System.Text.Json.Nodes.JsonValue.Create(dt.ToString("O"))
+                | None -> n["completedAt"] <- null
+                let arr = System.Text.Json.Nodes.JsonArray()
+                for i in state.CompletedSteps do arr.Add(System.Text.Json.Nodes.JsonValue.Create(i))
+                n["completedSteps"] <- arr
+                n["skipped"] <- System.Text.Json.Nodes.JsonValue.Create(state.Skipped)
+                n
+            do! Response.ofJson respJson ctx
+    }
+
+// PATCH /api/onboarding
+let patchOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let currentStep = root.GetProperty("currentStep").GetInt32()
+        let skipped =
+            match root.TryGetProperty("skipped") with
+            | true, el when el.ValueKind = JsonValueKind.True -> true
+            | _ -> false
+        let completedSteps =
+            match root.TryGetProperty("completedSteps") with
+            | true, el when el.ValueKind = JsonValueKind.Array ->
+                el.EnumerateArray() |> Seq.map (fun e -> e.GetInt32()) |> Seq.toList
+            | _ -> []
+        let tc = accessor.Context.Value
+        let! existingOpt = repo.GetAsync(tc.TenantId)
+        let startedAt =
+            match existingOpt with
+            | Some existing -> existing.StartedAt
+            | None -> DateTimeOffset.UtcNow
+        let state = {
+            TenantId = tc.TenantId
+            CurrentStep = currentStep
+            StartedAt = startedAt
+            CompletedAt = if currentStep >= 5 then Some DateTimeOffset.UtcNow else None
+            CompletedSteps = completedSteps
+            Skipped = skipped
+        }
+        do! repo.UpsertAsync(state)
+        do! Response.ofJson {| status = "updated" |} ctx
     }
 
 // POST /internal/transactions/upsert
@@ -778,6 +879,31 @@ wapp.UseRouting()
         delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             TransactionEndpoints.deleteTransactionHandler txnId ctx))
+        // Transaction splits
+        get "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.listSplitsHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.createSplitsHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitAttachmentEndpoints.deleteSplitHandler txnId splitId ctx))
+        // Transaction attachments
+        post "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.uploadAttachmentHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits/{splitId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitAttachmentEndpoints.uploadSplitAttachmentHandler txnId splitId ctx))
+        get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            SplitAttachmentEndpoints.getAttachmentHandler attachmentId ctx))
+        delete "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            SplitAttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
@@ -808,7 +934,7 @@ wapp.UseRouting()
         post "/internal/transactions/upsert" internalUpsertHandler
         post "/internal/transactions/remove" internalTransactionsRemoveHandler
         post "/internal/connections/status" internalConnectionStatusHandler
-        get "/internal/connections/{connectionId:guid}/credentials" internalConnectionCredentialsHandler
+        get "/internal/connections/{connectionId:guid}/credentials" (requireServiceToken serviceToken internalConnectionCredentialsHandler)
         post "/internal/sync-trigger" syncTriggerHandler
         post "/webhooks/plaid" plaidWebhookHandler
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
@@ -838,8 +964,18 @@ wapp.UseRouting()
         get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             BudgetEndpoints.getCurrentReportHandler budgetId ctx))
+        // Exports
+        get "/api/exports/transactions.csv" (AuthHelpers.requireAuth ExportEndpoints.exportTransactionsHandler)
+        get "/api/exports/accounts.csv" (AuthHelpers.requireAuth ExportEndpoints.exportAccountsHandler)
+        get "/api/exports/budgets/{budgetId:guid}/period/{periodId:guid}.csv" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            ExportEndpoints.exportBudgetPeriodHandler budgetId periodId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
+        // Onboarding
+        get "/api/onboarding" (AuthHelpers.requireAuth getOnboardingHandler)
+        patch "/api/onboarding" (AuthHelpers.requireAuth patchOnboardingHandler)
         // Reconciliations
         post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
         get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->

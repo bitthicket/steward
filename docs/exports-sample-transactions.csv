@@ -1,0 +1,11 @@
+id,occurred_at,posted_at,account_name,amount_minor,currency,description,merchant,category_path,status,source,external_id
+a1b2c3d4-e5f6-7890-abcd-ef1234567890,2026-04-15 09:30:00,2026-04-16 00:00:00,Chase Checking,-1250,USD,Grocery run,Whole Foods,Food > Groceries,cleared,dataFeed:plaid,txn_abc123
+b2c3d4e5-f6a7-8901-bcde-f12345678901,2026-04-14 18:45:00,2026-04-15 00:00:00,Chase Checking,-4500,USD,Dinner reservation,"The French Laundry, Yountville",Food > Dining,cleared,dataFeed:plaid,txn_def456
+c3d4e5f6-a7b8-9012-cdef-123456789012,2026-04-13 12:00:00,,Chase Checking,250000,USD,Payroll deposit,Acme Corp,Income > Salary,cleared,dataFeed:plaid,txn_ghi789
+d4e5f6a7-b8c9-0123-defa-234567890123,2026-04-12 08:15:00,2026-04-13 00:00:00,Amex Gold,-8999,USD,Monthly transit pass,MTA,Transport > Public Transit,cleared,dataFeed:plaid,txn_jkl012
+e5f6a7b8-c9d0-1234-efab-345678901234,2026-04-10 14:20:00,,Chase Checking,-3200,USD,Gas fill-up,Chevron,Transport > Fuel,pending,manual,
+f6a7b8c9-d0e1-2345-fabc-456789012345,2026-04-09 11:00:00,2026-04-10 00:00:00,Amex Gold,-12000,USD,Electric bill,PG&E,Housing > Utilities,cleared,dataFeed:plaid,txn_mno345
+g7b8c9d0-e1f2-3456-abcd-567890123456,2026-04-08 16:30:00,2026-04-09 00:00:00,Chase Checking,-1899,USD,Streaming subscription,"Netflix, Inc.",Entertainment > Streaming,cleared,dataFeed:plaid,txn_pqr678
+h8c9d0e1-f2a3-4567-bcde-678901234567,2026-04-07 10:00:00,,Chase Savings,-50000,USD,Transfer to savings,,Savings > Emergency Fund,manual,manual,
+i9d0e1f2-a3b4-5678-cdef-789012345678,2026-04-05 20:00:00,2026-04-06 00:00:00,Amex Gold,-6700,USD,Pharmacy pickup,CVS,Health > Pharmacy,cleared,dataFeed:plaid,txn_stu901
+j0e1f2a3-b4c5-6789-defa-890123456789,2026-04-03 07:45:00,2026-04-04 00:00:00,Chase Checking,-1450,USD,Coffee and pastry,Blue Bottle,Food > Dining,cleared,dataFeed:plaid,txn_vwx234

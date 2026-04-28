@@ -351,6 +351,9 @@ module Auth =
                     ctx.Response.StatusCode <- 409
                     do! Response.ofJson {| error = msg |} ctx
                 | Ok created ->
+                    let onboardingCtx = { TenantId = created.TenantId; UserId = created.UserId }
+                    do! OnboardingRepository.createInitialAsync factory onboardingCtx created.TenantId
+
                     // Seed default categories for the new tenant
                     let now = DateTimeOffset.UtcNow
                     let defaultCategories = [

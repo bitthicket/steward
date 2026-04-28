@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { auth } from '$lib/auth.svelte';
 	import { goto } from '$app/navigation';
-	import { listAccounts, getBalance, listTransactions, listConnections } from '$lib/api';
+	import { listAccounts, getBalance, listTransactions, listConnections, getOnboarding } from '$lib/api';
 	import MoneyDisplay from '$lib/MoneyDisplay.svelte';
 	import type { Account, Transaction, DataFeedConnection } from '$lib/types';
+	import type { OnboardingState } from '$lib/api';
 
 	$effect(() => {
 		if (!auth.user && !auth.loading) {
@@ -17,6 +18,8 @@
 	let connections = $state<DataFeedConnection[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let onboarding = $state<OnboardingState | null>(null);
+	let showChecklist = $state(false);
 
 	$effect(() => {
 		if (auth.user) {
@@ -28,11 +31,13 @@
 		loading = true;
 		error = null;
 		try {
-			const [acctRes, txnRes, connRes] = await Promise.all([
+			const [acctRes, txnRes, connRes, onb] = await Promise.all([
 				listAccounts(),
 				listTransactions({ limit: 10 }),
-				listConnections()
+				listConnections(),
+				getOnboarding().catch(() => null)
 			]);
+			onboarding = onb;
 			accounts = acctRes.accounts;
 			recentTxns = txnRes.transactions;
 			connections = connRes.connections;
@@ -97,6 +102,34 @@
 			</div>
 			<a href="/logout" class="text-sm text-blue-600 hover:underline">Log out</a>
 		</header>
+
+		{#if onboarding && onboarding.currentStep < 5}
+			<div class="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4">
+				<div class="flex items-center justify-between">
+					<p class="text-sm font-medium text-blue-800">Getting started</p>
+					<a href="/welcome" class="text-xs text-blue-600 hover:underline">Continue setup</a>
+				</div>
+				<ul class="mt-2 space-y-1">
+					<li class="flex items-center gap-2 text-xs text-blue-700">
+						<span class="text-green-600">✓</span> Create account
+					</li>
+					<li class="flex items-center gap-2 text-xs text-blue-700">
+						<span class="text-green-600">✓</span> Create tenant
+					</li>
+					<li class="flex items-center gap-2 text-xs {connections.length > 0 ? 'text-blue-700' : 'text-blue-600'}">
+						<span class="{connections.length > 0 ? 'text-green-600' : 'text-blue-400'}">{connections.length > 0 ? '✓' : '○'}</span>
+						Link a bank account
+					</li>
+					<li class="flex items-center gap-2 text-xs {recentTxns.length > 0 ? 'text-blue-700' : 'text-blue-600'}">
+						<span class="{recentTxns.length > 0 ? 'text-green-600' : 'text-blue-400'}">{recentTxns.length > 0 ? '✓' : '○'}</span>
+						First transaction
+					</li>
+					<li class="flex items-center gap-2 text-xs text-blue-600">
+						<span class="text-blue-400">○</span> Create a budget
+					</li>
+				</ul>
+			</div>
+		{/if}
 
 		{#if failingConnections.length > 0}
 			<div class="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-4">
