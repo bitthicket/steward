@@ -32,6 +32,7 @@
     <Compile Include="BudgetReportTests.fs" />
     <Compile Include="ExportEndpointsTests.fs" />
     <Compile Include="DataFeedConnectionRepositoryTests.fs" />
+    <Compile Include="CreditCardPaymentRepositoryTests.fs" />
     <Compile Include="FeedHealthWorkerTests.fs" />
     <Compile Include="RemediationAttemptRepositoryTests.fs" />
     <Compile Include="ConnectionEndpointsTests.fs" />

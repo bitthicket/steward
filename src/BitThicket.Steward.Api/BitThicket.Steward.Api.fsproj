@@ -13,6 +13,7 @@
     <Compile Include="AccountRepository.fs" />
     <Compile Include="CategoryRepository.fs" />
     <Compile Include="TransactionRepository.fs" />
+    <Compile Include="CreditCardPaymentRepository.fs" />
     <Compile Include="TransactionMatcher.fs" />
     <Compile Include="AttachmentStorage.fs" />
     <Compile Include="SplitRepository.fs" />
@@ -38,6 +39,7 @@
     <Compile Include="BudgetEndpoints.fs" />
     <Compile Include="ExportEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
+    <Compile Include="TransferEndpoints.fs" />
     <Compile Include="CategoryEndpoints.fs" />
     <Compile Include="ReconciliationEndpoints.fs" />
     <Compile Include="UserPreferencesEndpoints.fs" />
