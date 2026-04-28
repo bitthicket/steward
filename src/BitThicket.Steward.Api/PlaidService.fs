@@ -307,6 +307,7 @@ type PlaidService(
                               Status = TransactionStatus.Cleared
                               MatchConfidence = None
                               SyncEventId = syncEventId
+                              DeletedAt = None
                               CreatedAt = now
                               UpdatedAt = now }
 

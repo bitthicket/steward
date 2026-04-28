@@ -232,98 +232,108 @@ let syncTriggerHandler (client: IPlaidClient) (http: HttpClient) (logger: ILogge
             do! Response.ofJson {| error = "Failed to fetch credentials"; detail = msg |} ctx
         | Ok (provider, _providerMetadata, vaultEnvelope) ->
             // Parse vault envelope to extract access token
-            let accessToken =
+            let accessTokenResult =
                 try
                     use envDoc = JsonDocument.Parse(vaultEnvelope)
                     match envDoc.RootElement.TryGetProperty("accessToken") with
-                    | true, p -> p.GetString()
-                    | _ -> "stub-access-token"
-                with _ -> "stub-access-token"
+                    | true, p ->
+                        let token = p.GetString()
+                        if String.IsNullOrWhiteSpace(token) then
+                            Error "accessToken is empty in vault envelope"
+                        else
+                            Ok token
+                    | _ -> Error "accessToken missing from vault envelope"
+                with ex -> Error $"Failed to parse vault envelope: {ex.Message}"
 
-            logger.LogInformation(
-                "Fetched credentials for provider={Provider} connection={ConnectionId}",
-                provider, connectionId)
-
-            // 2. Start sync event (optional — endpoint may not exist yet)
-            let! syncEventIdOpt =
-                task {
-                    let! result = InternalApiClient.postSyncEventStart http tenantId connectionId
-                    match result with
-                    | Ok id -> return id
-                    | Error msg ->
-                        logger.LogWarning("Failed to record sync start: {Message}", msg)
-                        return None
-                }
-
-            // 3. Fetch accounts from Plaid (stubbed — returns canned data)
-            let! accounts = client.FetchAccountsAsync(accessToken)
-
-            let accountsToSync =
-                match accountIdOpt with
-                | Some accountId -> accounts |> List.filter (fun a -> a.AccountId = accountId)
-                | None -> accounts
-
-            logger.LogInformation(
-                "Fetched {AccountCount} accounts from Plaid for tenant={TenantId}",
-                accountsToSync.Length, tenantId)
-
-            // 4. Fetch transactions for each account and normalize
-            let mutable allNormalized : NormalizedTransaction list = []
-
-            for account in accountsToSync do
-                let! txns = client.FetchTransactionsAsync(accessToken, account.AccountId)
-                let normalized = txns |> List.map PlaidNormalization.normalize
-                allNormalized <- allNormalized @ normalized
-                logger.LogInformation(
-                    "Fetched {TxnCount} transactions for account={AccountId}",
-                    txns.Length, account.AccountId)
-
-            // 5. Upsert transactions to Core API
-            let! upsertResult = InternalApiClient.postTransactionsUpsert http tenantId syncEventIdOpt allNormalized
-
-            let mutable upsertedCount = 0
-            let mutable upsertFailed = false
-
-            match upsertResult with
-            | Ok json ->
-                try
-                    use doc = JsonDocument.Parse(json)
-                    let created =
-                        match doc.RootElement.TryGetProperty("created") with
-                        | true, p -> p.GetInt32()
-                        | _ -> 0
-                    let updated =
-                        match doc.RootElement.TryGetProperty("updated") with
-                        | true, p -> p.GetInt32()
-                        | _ -> 0
-                    upsertedCount <- created + updated
-                with _ ->
-                    upsertedCount <- allNormalized.Length
+            match accessTokenResult with
             | Error msg ->
-                logger.LogError("Failed to upsert transactions: {Message}", msg)
-                upsertFailed <- true
+                logger.LogError("Credential parse failed for connection={ConnectionId}: {Message}", connectionId, msg)
                 ctx.Response.StatusCode <- 502
-                do! Response.ofJson {| error = "Core API upsert failed"; detail = msg |} ctx
+                do! Response.ofJson {| error = "Invalid credentials"; detail = msg |} ctx
+            | Ok accessToken ->
+                logger.LogInformation(
+                    "Fetched credentials for provider={Provider} connection={ConnectionId}",
+                    provider, connectionId)
 
-            if not upsertFailed then
-                // 6. Complete sync event (optional — endpoint may not exist yet)
-                match syncEventIdOpt with
-                | Some syncEventId ->
-                    let! completeResult =
-                        InternalApiClient.patchSyncEventComplete http syncEventId "completed" upsertedCount 0
-                    match completeResult with
-                    | Ok () -> ()
-                    | Error msg -> logger.LogWarning("Failed to record sync completion: {Message}", msg)
-                | None -> ()
+                // 2. Start sync event (optional — endpoint may not exist yet)
+                let! syncEventIdOpt =
+                    task {
+                        let! result = InternalApiClient.postSyncEventStart http tenantId connectionId
+                        match result with
+                        | Ok id -> return id
+                        | Error msg ->
+                            logger.LogWarning("Failed to record sync start: {Message}", msg)
+                            return None
+                    }
 
-                let response =
-                    {|
-                        status = "completed"
-                        accountsFetched = accountsToSync.Length
-                        transactionsFetched = allNormalized.Length
-                        transactionsUpserted = upsertedCount
-                    |}
-                do! Response.ofJson response ctx
+                // 3. Fetch accounts from Plaid (stubbed — returns canned data)
+                let! accounts = client.FetchAccountsAsync(accessToken)
+
+                let accountsToSync =
+                    match accountIdOpt with
+                    | Some accountId -> accounts |> List.filter (fun a -> a.AccountId = accountId)
+                    | None -> accounts
+
+                logger.LogInformation(
+                    "Fetched {AccountCount} accounts from Plaid for tenant={TenantId}",
+                    accountsToSync.Length, tenantId)
+
+                // 4. Fetch transactions for each account and normalize
+                let mutable allNormalized : NormalizedTransaction list = []
+
+                for account in accountsToSync do
+                    let! txns = client.FetchTransactionsAsync(accessToken, account.AccountId)
+                    let normalized = txns |> List.map PlaidNormalization.normalize
+                    allNormalized <- allNormalized @ normalized
+                    logger.LogInformation(
+                        "Fetched {TxnCount} transactions for account={AccountId}",
+                        txns.Length, account.AccountId)
+
+                // 5. Upsert transactions to Core API
+                let! upsertResult = InternalApiClient.postTransactionsUpsert http tenantId syncEventIdOpt allNormalized
+
+                let mutable upsertedCount = 0
+                let mutable upsertFailed = false
+
+                match upsertResult with
+                | Ok json ->
+                    try
+                        use doc = JsonDocument.Parse(json)
+                        let created =
+                            match doc.RootElement.TryGetProperty("created") with
+                            | true, p -> p.GetInt32()
+                            | _ -> 0
+                        let updated =
+                            match doc.RootElement.TryGetProperty("updated") with
+                            | true, p -> p.GetInt32()
+                        upsertedCount <- created + updated
+                    with _ ->
+                        upsertedCount <- allNormalized.Length
+                | Error msg ->
+                    logger.LogError("Failed to upsert transactions: {Message}", msg)
+                    upsertFailed <- true
+                    ctx.Response.StatusCode <- 502
+                    do! Response.ofJson {| error = "Core API upsert failed"; detail = msg |} ctx
+
+                if not upsertFailed then
+                    // 6. Complete sync event (optional — endpoint may not exist yet)
+                    match syncEventIdOpt with
+                    | Some syncEventId ->
+                        let! completeResult =
+                            InternalApiClient.patchSyncEventComplete http syncEventId "completed" upsertedCount 0
+                        match completeResult with
+                        | Ok () -> ()
+                        | Error msg -> logger.LogWarning("Failed to record sync completion: {Message}", msg)
+                    | None -> ()
+
+                    let response =
+                        {|
+                            status = "completed"
+                            accountsFetched = accountsToSync.Length
+                            transactionsFetched = allNormalized.Length
+                            transactionsUpserted = upsertedCount
+                        |}
+                    do! Response.ofJson response ctx
     }
 
 // ── Application bootstrap ────────────────────────────────────────────────────

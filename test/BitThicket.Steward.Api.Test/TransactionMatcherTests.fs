@@ -31,6 +31,7 @@ let private makeManualTxn (accountId: Guid) (occurredAt: DateTimeOffset) (descri
         Status = TransactionStatus.Pending
         MatchConfidence = None
         SyncEventId = None
+        DeletedAt = None
         CreatedAt = now
         UpdatedAt = now
     }
@@ -320,6 +321,7 @@ type IntegrationTests() =
                       Status = TransactionStatus.Cleared
                       MatchConfidence = Some conf
                       SyncEventId = None
+                      DeletedAt = None
                       CreatedAt = now
                       UpdatedAt = now }
                 let! _ = repo.CreateAsync(feedTxn)

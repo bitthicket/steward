@@ -2,6 +2,7 @@ namespace BitThicket.Steward.Api
 
 open System
 open System.IO
+open System.Net.Http
 open System.Text
 open System.Text.Json
 open System.Threading.Tasks
@@ -175,7 +176,115 @@ module McpTools =
         }
     }
 
-    let allTools = [ echoTool; listAccountsTool; getAccountBalanceTool ]
+    let categorizeTransactionTool : Tool = {
+        name = "categorize_transaction"
+        description = "Set the category for a specific transaction."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "transactionId", { ``type`` = "string"; description = "The transaction UUID." }
+                "categoryId", { ``type`` = "string"; description = "The category UUID." }
+            ]
+            required = ["transactionId"; "categoryId"]
+        }
+    }
+
+    let createBudgetTool : Tool = {
+        name = "create_budget"
+        description = "Create a new budget with its first period and allocations."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "name", { ``type`` = "string"; description = "Budget name." }
+                "period", { ``type`` = "string"; description = "Period type: monthly, biweekly, weekly." }
+                "currency", { ``type`` = "string"; description = "Currency code (e.g. USD)." }
+                "style", { ``type`` = "string"; description = "Budgeting style: zeroBased, envelope, flexible, traditionalLimits." }
+                "allocations", { ``type`` = "array"; description = "Category allocations for the first period. Each item: { categoryId: string, amountMinor: number }" }
+            ]
+            required = ["name"; "period"; "currency"; "style"; "allocations"]
+        }
+    }
+
+    let triggerSyncTool : Tool = {
+        name = "trigger_sync"
+        description = "Trigger an on-demand sync for a data feed connection."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "connectionId", { ``type`` = "string"; description = "The connection UUID." }
+            ]
+            required = ["connectionId"]
+        }
+    }
+
+    let reconcileAccountTool : Tool = {
+        name = "reconcile_account"
+        description = "Create a reconciliation for an account, link transactions, and complete it."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "accountId", { ``type`` = "string"; description = "The account UUID." }
+                "statementDate", { ``type`` = "string"; description = "Statement date (yyyy-MM-dd)." }
+                "statementBalanceMinor", { ``type`` = "number"; description = "Statement balance in minor units." }
+                "currency", { ``type`` = "string"; description = "Currency code." }
+                "transactionIds", { ``type`` = "array"; description = "List of transaction UUIDs to include." }
+                "force", { ``type`` = "boolean"; description = "Force complete even if balance differs." }
+            ]
+            required = ["accountId"; "statementDate"; "statementBalanceMinor"; "currency"; "transactionIds"]
+        }
+    }
+
+    let acceptMatchTool : Tool = {
+        name = "accept_match"
+        description = "Accept a proposed match between a feed transaction and a manual transaction."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "transactionId", { ``type`` = "string"; description = "The feed transaction UUID." }
+                "manualTxnId", { ``type`` = "string"; description = "Optional manual transaction UUID (defaults to the matched one)." }
+            ]
+            required = ["transactionId"]
+        }
+    }
+
+    let rejectMatchTool : Tool = {
+        name = "reject_match"
+        description = "Reject a proposed match for a feed transaction."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "transactionId", { ``type`` = "string"; description = "The feed transaction UUID." }
+            ]
+            required = ["transactionId"]
+        }
+    }
+
+    let recordRemediationTool : Tool = {
+        name = "record_remediation"
+        description = "Record a remediation attempt for a failing connection."
+        inputSchema = {
+            ``type`` = "object"
+            properties = Map [
+                "connectionId", { ``type`` = "string"; description = "The connection UUID." }
+                "strategy", { ``type`` = "string"; description = "Remediation strategy identifier." }
+                "notes", { ``type`` = "string"; description = "Optional notes." }
+            ]
+            required = ["connectionId"; "strategy"]
+        }
+    }
+
+    let allTools = [
+        echoTool
+        listAccountsTool
+        getAccountBalanceTool
+        categorizeTransactionTool
+        createBudgetTool
+        triggerSyncTool
+        reconcileAccountTool
+        acceptMatchTool
+        rejectMatchTool
+        recordRemediationTool
+    ]
 
     let callEcho (args: JsonElement) : ToolCallResult =
         let message =
@@ -260,6 +369,318 @@ module McpTools =
                     let result = {| balance = balance; converted = converted; displayCurrency = displayCurrencyOpt |}
                     { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize(result, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
 
+    // ── Mutation tools ───────────────────────────────────────────────────────
+
+    let private requireTenant (accessor: ITenantContextAccessor) f =
+        match accessor.Context with
+        | None -> { content = [ {| ``type`` = "text"; text = "Unauthorized: no tenant context" |} :> obj ]; isError = true }
+        | Some tc -> f tc
+
+    let private tryGetGuidArg (args: JsonElement) (name: string) : Guid option =
+        match args.TryGetProperty(name) with
+        | true, v when v.ValueKind = JsonValueKind.String ->
+            match Guid.TryParse(v.GetString()) with true, g -> Some g | _ -> None
+        | _ -> None
+
+    let private tryGetStringArg (args: JsonElement) (name: string) : string option =
+        match args.TryGetProperty(name) with
+        | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString())
+        | _ -> None
+
+    let private tryGetBoolArg (args: JsonElement) (name: string) : bool option =
+        match args.TryGetProperty(name) with
+        | true, v when v.ValueKind = JsonValueKind.True -> Some true
+        | true, v when v.ValueKind = JsonValueKind.False -> Some false
+        | _ -> None
+
+    let private tryGetInt64Arg (args: JsonElement) (name: string) : int64 option =
+        match args.TryGetProperty(name) with
+        | true, v when v.ValueKind = JsonValueKind.Number ->
+            match v.TryGetInt64() with true, n -> Some n | _ -> None
+        | _ -> None
+
+    let private fromMinor (minor: int64) (currency: string) : Money =
+        MoneyHelpers.fromMinorUnits minor currency
+
+    let callCategorizeTransaction (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let categoryRepo = CategoryRepository.create factory accessor
+        requireTenant accessor (fun _tc ->
+            match tryGetGuidArg args "transactionId", tryGetGuidArg args "categoryId" with
+            | None, _ -> { content = [ {| ``type`` = "text"; text = "Invalid transactionId" |} :> obj ]; isError = true }
+            | _, None -> { content = [ {| ``type`` = "text"; text = "Invalid categoryId" |} :> obj ]; isError = true }
+            | Some txnId, Some catId ->
+                let txnRepo = TransactionRepository.create factory accessor
+                let catOpt = categoryRepo.GetAsync(catId).GetAwaiter().GetResult()
+                match catOpt with
+                | None -> { content = [ {| ``type`` = "text"; text = "Category not found" |} :> obj ]; isError = true }
+                | Some _ ->
+                    let txnOpt = txnRepo.GetAsync(txnId).GetAwaiter().GetResult()
+                    match txnOpt with
+                    | None -> { content = [ {| ``type`` = "text"; text = "Transaction not found" |} :> obj ]; isError = true }
+                    | Some txn ->
+                        let updated = { txn with CategoryId = Some catId; UpdatedAt = DateTimeOffset.UtcNow }
+                        txnRepo.UpdateAsync(updated).GetAwaiter().GetResult()
+                        { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; transactionId = txnId; categoryId = catId |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+        )
+
+    let callCreateBudget (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        requireTenant accessor (fun tc ->
+            let name = tryGetStringArg args "name" |> Option.defaultValue ""
+            let periodStr = tryGetStringArg args "period" |> Option.defaultValue ""
+            let currency = tryGetStringArg args "currency" |> Option.defaultValue "USD"
+            let styleStr = tryGetStringArg args "style" |> Option.defaultValue ""
+            let periodOpt =
+                match periodStr.ToLowerInvariant() with
+                | "monthly" -> Some BudgetPeriod.Monthly
+                | "biweekly" -> Some BudgetPeriod.BiWeekly
+                | "weekly" -> Some BudgetPeriod.Weekly
+                | _ -> None
+            let styleOpt =
+                match styleStr.ToLowerInvariant() with
+                | "zerobased" | "zero_based" -> Some BudgetingStyle.ZeroBased
+                | "envelope" -> Some BudgetingStyle.Envelope
+                | "flexible" -> Some BudgetingStyle.Flexible
+                | "traditionallimits" | "traditional_limits" -> Some BudgetingStyle.TraditionalLimits
+                | _ -> None
+            match periodOpt, styleOpt with
+            | None, _ -> { content = [ {| ``type`` = "text"; text = "Invalid period. Use: monthly, biweekly, weekly" |} :> obj ]; isError = true }
+            | _, None -> { content = [ {| ``type`` = "text"; text = "Invalid style. Use: zeroBased, envelope, flexible, traditionalLimits" |} :> obj ]; isError = true }
+            | Some period, Some style ->
+                let budgetRepo = BudgetRepository.create factory accessor
+                let periodRepo = BudgetPeriodRepository.create factory accessor
+                let budget = {
+                    Id = Guid.NewGuid()
+                    TenantId = tc.TenantId
+                    UserId = tc.UserId
+                    Name = name
+                    Style = style
+                    Period = period
+                    CurrencyCode = currency
+                    Income = Money.zero currency
+                    IsActive = true
+                    StartsOn = DateOnly.FromDateTime(DateTime.UtcNow)
+                    CreatedAt = DateTimeOffset.UtcNow
+                    UpdatedAt = DateTimeOffset.UtcNow
+                }
+                let budgetId = budgetRepo.CreateAsync(budget).GetAwaiter().GetResult()
+                let endDate =
+                    match period with
+                    | BudgetPeriod.Monthly -> budget.StartsOn.AddMonths(1).AddDays(-1)
+                    | BudgetPeriod.BiWeekly -> budget.StartsOn.AddDays(13)
+                    | BudgetPeriod.Weekly -> budget.StartsOn.AddDays(6)
+                    | BudgetPeriod.Custom d -> budget.StartsOn.AddDays(d - 1)
+                let firstPeriod = {
+                    Id = Guid.NewGuid()
+                    BudgetId = budgetId
+                    TenantId = tc.TenantId
+                    StartDate = budget.StartsOn
+                    EndDate = endDate
+                    Status = BudgetPeriodStatus.Open
+                    CreatedAt = DateTimeOffset.UtcNow
+                    UpdatedAt = DateTimeOffset.UtcNow
+                }
+                let allocations =
+                    match args.TryGetProperty("allocations") with
+                    | true, v when v.ValueKind = JsonValueKind.Array ->
+                        v.EnumerateArray()
+                        |> Seq.choose (fun el ->
+                            match tryGetGuidArg el "categoryId", tryGetInt64Arg el "amountMinor" with
+                            | Some cid, Some minor ->
+                                Some {
+                                    BudgetPeriodId = firstPeriod.Id
+                                    CategoryId = cid
+                                    AllocatedAmount = fromMinor minor currency
+                                    OpeningBalance = Money.zero currency
+                                    RolloverBalance = Money.zero currency
+                                    RolloverEnabled = false
+                                }
+                            | _ -> None)
+                        |> Seq.toList
+                    | _ -> []
+                periodRepo.CreatePeriodAsync(firstPeriod, allocations).GetAwaiter().GetResult() |> ignore
+                { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; budgetId = budgetId |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+        )
+
+    let callTriggerSync (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+        requireTenant accessor (fun tc ->
+            match tryGetGuidArg args "connectionId" with
+            | None -> { content = [ {| ``type`` = "text"; text = "Invalid connectionId" |} :> obj ]; isError = true }
+            | Some connId ->
+                let connRepo = DataFeedConnectionRepository.create factory accessor
+                let connOpt = connRepo.GetAsync(connId).GetAwaiter().GetResult()
+                match connOpt with
+                | None -> { content = [ {| ``type`` = "text"; text = "Connection not found" |} :> obj ]; isError = true }
+                | Some conn ->
+                    let plaidUrl = Environment.GetEnvironmentVariable("STEWARD_PLAID_INGESTION_URL")
+                    let akoyaUrl = Environment.GetEnvironmentVariable("STEWARD_AKOYA_INGESTION_URL")
+                    let token = Environment.GetEnvironmentVariable("STEWARD_SERVICE_TOKEN")
+                    let provider = DataFeedConnection.providerOf conn.Metadata
+                    let sendSync (url: string) =
+                        let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                        req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                        let payload = System.Text.Json.Nodes.JsonObject()
+                        payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tc.TenantId.ToString())
+                        payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connId.ToString())
+                        req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                        let resp = http.SendAsync(req).GetAwaiter().GetResult()
+                        let body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                        if not resp.IsSuccessStatusCode then
+                            Error $"Ingestion failed: {body}"
+                        else
+                            Ok {| status = "sync_triggered"; provider = string provider; connectionId = connId |}
+                    let result =
+                        match provider with
+                        | DataFeedProvider.Plaid ->
+                            match String.IsNullOrEmpty(plaidUrl), String.IsNullOrEmpty(token) with
+                            | false, false -> sendSync plaidUrl
+                            | _ -> Error "Plaid ingestion URL or service token not configured"
+                        | DataFeedProvider.Akoya ->
+                            match String.IsNullOrEmpty(akoyaUrl), String.IsNullOrEmpty(token) with
+                            | false, false -> sendSync akoyaUrl
+                            | _ -> Error "Akoya ingestion URL or service token not configured"
+                        | _ -> Error "Provider not yet supported for sync trigger"
+                    match result with
+                    | Ok resp ->
+                        { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; result = resp |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+                    | Error msg ->
+                        { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = false; error = msg |}, McpProtocol.jsonOptions) |} :> obj ]; isError = true }
+        )
+
+    let callReconcileAccount (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        requireTenant accessor (fun tc ->
+            match tryGetGuidArg args "accountId", tryGetStringArg args "statementDate", tryGetInt64Arg args "statementBalanceMinor" with
+            | None, _, _ -> { content = [ {| ``type`` = "text"; text = "Invalid accountId" |} :> obj ]; isError = true }
+            | _, None, _ -> { content = [ {| ``type`` = "text"; text = "Missing statementDate" |} :> obj ]; isError = true }
+            | _, _, None -> { content = [ {| ``type`` = "text"; text = "Missing statementBalanceMinor" |} :> obj ]; isError = true }
+            | Some accountId, Some dateStr, Some balanceMinor ->
+                match DateOnly.TryParse(dateStr) with
+                | false, _ -> { content = [ {| ``type`` = "text"; text = "Invalid statementDate format. Use: yyyy-MM-dd" |} :> obj ]; isError = true }
+                | true, statementDate ->
+                    let currency = tryGetStringArg args "currency" |> Option.defaultValue "USD"
+                    let force = tryGetBoolArg args "force" |> Option.defaultValue false
+                    let txnIds =
+                        match args.TryGetProperty("transactionIds") with
+                        | true, v when v.ValueKind = JsonValueKind.Array ->
+                            v.EnumerateArray()
+                            |> Seq.choose (fun el -> match Guid.TryParse(el.GetString()) with true, g -> Some g | _ -> None)
+                            |> Seq.toList
+                        | _ -> []
+                    let reconRepo = ReconciliationRepository.create factory accessor
+                    let recon : Reconciliation = {
+                        Id = Guid.NewGuid()
+                        TenantId = tc.TenantId
+                        AccountId = accountId
+                        StatementDate = statementDate
+                        StatementBalance = fromMinor balanceMinor currency
+                        Status = ReconciliationStatus.Open
+                        Note = None
+                        CreatedByUserId = tc.UserId
+                        StartedAt = DateTimeOffset.UtcNow
+                        CompletedAt = None
+                    }
+                    let reconId = reconRepo.CreateAsync(recon).GetAwaiter().GetResult()
+                    reconRepo.UpdateIncludedTransactionsAsync(reconId, txnIds, []).GetAwaiter().GetResult()
+                    let completeResult = reconRepo.CompleteAsync(reconId, force, None).GetAwaiter().GetResult()
+                    match completeResult with
+                    | Ok diffMinor ->
+                        { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; reconciliationId = reconId; diffMinor = diffMinor |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+                    | Error msg when msg.StartsWith("diff:") ->
+                        let diffStr = msg.[5..]
+                        let diffMinor = int64 diffStr
+                        { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = false; error = "Balance mismatch"; diffMinor = diffMinor; reconciliationId = reconId |}, McpProtocol.jsonOptions) |} :> obj ]; isError = true }
+                    | Error msg ->
+                        { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = false; error = msg |}, McpProtocol.jsonOptions) |} :> obj ]; isError = true }
+        )
+
+    let callAcceptMatch (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        requireTenant accessor (fun _tc ->
+            match tryGetGuidArg args "transactionId" with
+            | None -> { content = [ {| ``type`` = "text"; text = "Invalid transactionId" |} :> obj ]; isError = true }
+            | Some txnId ->
+                let txnRepo = TransactionRepository.create factory accessor
+                let txnOpt = txnRepo.GetAsync(txnId).GetAwaiter().GetResult()
+                match txnOpt with
+                | None -> { content = [ {| ``type`` = "text"; text = "Transaction not found" |} :> obj ]; isError = true }
+                | Some txn when txn.Status <> TransactionStatus.NeedsReview ->
+                    { content = [ {| ``type`` = "text"; text = "Transaction is not in NeedsReview status" |} :> obj ]; isError = true }
+                | Some txn ->
+                    let manualIdResult =
+                        match tryGetGuidArg args "manualTxnId" with
+                        | Some m -> Ok m
+                        | None ->
+                            match txn.MatchedTransactionId with
+                            | Some m -> Ok m
+                            | None -> Error "No manual transaction to accept"
+                    match manualIdResult with
+                    | Error msg -> { content = [ {| ``type`` = "text"; text = msg |} :> obj ]; isError = true }
+                    | Ok manualId ->
+                        let manualOpt = txnRepo.GetAsync(manualId).GetAwaiter().GetResult()
+                        match manualOpt with
+                        | None -> { content = [ {| ``type`` = "text"; text = "Manual transaction not found" |} :> obj ]; isError = true }
+                        | Some manual ->
+                            let now = DateTimeOffset.UtcNow
+                            let updatedFeed = { txn with Status = TransactionStatus.Cleared; MatchedTransactionId = Some manualId; UpdatedAt = now }
+                            let updatedManual = { manual with Status = TransactionStatus.Cleared; MatchedTransactionId = Some txnId; UpdatedAt = now }
+                            txnRepo.UpdateAsync(updatedFeed).GetAwaiter().GetResult()
+                            txnRepo.UpdateAsync(updatedManual).GetAwaiter().GetResult()
+                            { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; action = "accept"; manualTxnId = manualId |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+        )
+
+    let callRejectMatch (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        requireTenant accessor (fun _tc ->
+            match tryGetGuidArg args "transactionId" with
+            | None -> { content = [ {| ``type`` = "text"; text = "Invalid transactionId" |} :> obj ]; isError = true }
+            | Some txnId ->
+                let txnRepo = TransactionRepository.create factory accessor
+                let txnOpt = txnRepo.GetAsync(txnId).GetAwaiter().GetResult()
+                match txnOpt with
+                | None -> { content = [ {| ``type`` = "text"; text = "Transaction not found" |} :> obj ]; isError = true }
+                | Some txn when txn.Status <> TransactionStatus.NeedsReview ->
+                    { content = [ {| ``type`` = "text"; text = "Transaction is not in NeedsReview status" |} :> obj ]; isError = true }
+                | Some txn ->
+                    let updated = { txn with Status = TransactionStatus.Cleared; MatchedTransactionId = None; MatchConfidence = None; UpdatedAt = DateTimeOffset.UtcNow }
+                    txnRepo.UpdateAsync(updated).GetAwaiter().GetResult()
+                    { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; action = "reject" |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+        )
+
+    let callRecordRemediation (ctx: HttpContext) (args: JsonElement) : ToolCallResult =
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        requireTenant accessor (fun tc ->
+            match tryGetGuidArg args "connectionId", tryGetStringArg args "strategy" with
+            | None, _ -> { content = [ {| ``type`` = "text"; text = "Invalid connectionId" |} :> obj ]; isError = true }
+            | _, None -> { content = [ {| ``type`` = "text"; text = "Missing strategy" |} :> obj ]; isError = true }
+            | Some connId, Some strategy ->
+                let repo = RemediationAttemptRepository.create factory accessor
+                let attempt : RemediationAttempt = {
+                    Id = Guid.NewGuid()
+                    TenantId = tc.TenantId
+                    ConnectionId = connId
+                    StartedAt = DateTimeOffset.UtcNow
+                    CompletedAt = None
+                    ActorAgentId = None
+                    ActorUserId = Some tc.UserId
+                    Strategy = strategy
+                    Outcome = None
+                    Notes = tryGetStringArg args "notes"
+                }
+                let id = repo.CreateAsync(attempt).GetAwaiter().GetResult()
+                { content = [ {| ``type`` = "text"; text = JsonSerializer.Serialize({| ok = true; remediationId = id |}, McpProtocol.jsonOptions) |} :> obj ]; isError = false }
+        )
+
 // ── MCP Resource Registry ─────────────────────────────────────────────────────
 
 module McpResources =
@@ -319,6 +740,13 @@ module McpServer =
             | "echo" -> McpTools.callEcho arguments
             | "list_accounts" -> McpTools.callListAccounts ctx arguments
             | "get_account_balance" -> McpTools.callGetAccountBalance ctx arguments
+            | "categorize_transaction" -> McpTools.callCategorizeTransaction ctx arguments
+            | "create_budget" -> McpTools.callCreateBudget ctx arguments
+            | "trigger_sync" -> McpTools.callTriggerSync ctx arguments
+            | "reconcile_account" -> McpTools.callReconcileAccount ctx arguments
+            | "accept_match" -> McpTools.callAcceptMatch ctx arguments
+            | "reject_match" -> McpTools.callRejectMatch ctx arguments
+            | "record_remediation" -> McpTools.callRecordRemediation ctx arguments
             | _ -> { content = [ {| ``type`` = "text"; text = $"Unknown tool: {name}" |} :> obj ]; isError = true }
         makeResult id result
 
@@ -420,23 +848,19 @@ module McpServer =
             currentPeriod = currentPeriod
         |}
 
-    let private categoryToResponse (category: Category) =
-        {|
+    let private categoryToResponse (category: Category) : CategoryResponse =
+        {
             id = category.Id
             name = category.Name
-            parentCategoryId = category.ParentCategoryId
+            parentId = category.ParentCategoryId
             isSystem = category.IsSystem
+            currency = category.CurrencyCode
+            rolloverEnabled = category.RolloverEnabled
             createdAt = category.CreatedAt
-        |}
+            updatedAt = category.UpdatedAt
+        }
 
-    type CategoryTreeNode = {
-        id: Guid
-        name: string
-        isSystem: bool
-        children: CategoryTreeNode list
-    }
-
-    let private buildCategoryTree (categories: Category list) =
+    let private buildCategoryTree (categories: Category list) : CategoryTreeNode list =
         let byParent = categories |> List.groupBy (fun c -> c.ParentCategoryId) |> Map.ofList
         let rec buildNode (cat: Category) =
             let children =
@@ -445,7 +869,14 @@ module McpServer =
                 |> Option.defaultValue []
                 |> List.sortBy (fun (c: Category) -> c.Name)
                 |> List.map buildNode
-            { id = cat.Id; name = cat.Name; isSystem = cat.IsSystem; children = children }
+            {
+                id = cat.Id
+                name = cat.Name
+                isSystem = cat.IsSystem
+                currency = cat.CurrencyCode
+                rolloverEnabled = cat.RolloverEnabled
+                children = children
+            }
         let roots =
             byParent
             |> Map.tryFind None
@@ -453,6 +884,40 @@ module McpServer =
             |> List.sortBy (fun (c: Category) -> c.Name)
             |> List.map buildNode
         roots
+
+    // ── Transaction response mapping (mirror public API shape) ───────────────
+
+    let private txnStatusToString (s: TransactionStatus) : string =
+        match s with
+        | TransactionStatus.Pending     -> "pending"
+        | TransactionStatus.NeedsReview -> "needsReview"
+        | TransactionStatus.Cleared     -> "cleared"
+        | TransactionStatus.Reconciled  -> "reconciled"
+
+    let private txnSourceToString (s: TransactionSource) : string =
+        match s with
+        | TransactionSource.Manual -> "manual"
+        | TransactionSource.DataFeed provider -> $"dataFeed:{provider}"
+        | TransactionSource.Import format -> $"import:{format}"
+
+    let private txnToResponse (txn: Transaction) : TransactionResponse =
+        {
+            id = txn.Id
+            accountId = txn.AccountId
+            occurredAt = txn.OccurredAt
+            postedAt = txn.PostedAt
+            amount = txn.Amount.Amount
+            currency = txn.Amount.CurrencyCode
+            description = txn.Description
+            merchant = txn.Merchant
+            notes = txn.Memo
+            categoryId = txn.CategoryId
+            status = txnStatusToString txn.Status
+            source = txnSourceToString txn.Source
+            transferAccountId = txn.TransferAccountId
+            createdAt = txn.CreatedAt
+            updatedAt = txn.UpdatedAt
+        }
 
     let private handleResourcesRead (ctx: HttpContext) (id: JsonElement) (paramsEl: JsonElement) : JsonDocument =
         let uri =
@@ -496,24 +961,25 @@ module McpServer =
 
                     | ["transactions"] ->
                         let txnRepo = TransactionRepository.create factory accessor
-                        let txns = txnRepo.ListAsync().GetAwaiter().GetResult()
-                        let filtered =
-                            txns
-                            |> List.filter (fun t ->
-                                let accountFilter =
-                                    match query.TryFind "accountId" with
-                                    | Some aid -> match Guid.TryParse(aid) with true, g -> t.AccountId = g | _ -> true
-                                    | None -> true
-                                let fromFilter =
-                                    match query.TryFind "from" with
-                                    | Some f -> match DateTimeOffset.TryParse(f) with true, d -> t.OccurredAt >= d | _ -> true
-                                    | None -> true
-                                let toFilter =
-                                    match query.TryFind "to" with
-                                    | Some f -> match DateTimeOffset.TryParse(f) with true, d -> t.OccurredAt <= d | _ -> true
-                                    | None -> true
-                                accountFilter && fromFilter && toFilter)
-                        let resp = {| transactions = filtered |}
+                        let accountIdOpt = query.TryFind "accountId" |> Option.bind (fun s -> match Guid.TryParse(s) with true, g -> Some g | _ -> None)
+                        let fromOpt = query.TryFind "from" |> Option.bind (fun s -> match DateTimeOffset.TryParse(s) with true, d -> Some d | _ -> None)
+                        let toOpt = query.TryFind "to" |> Option.bind (fun s -> match DateTimeOffset.TryParse(s) with true, d -> Some d | _ -> None)
+                        let statusOpt = query.TryFind "status" |> Option.bind (fun s -> try Some (TransactionRepository.statusFromString s) with _ -> None)
+                        let limit = query.TryFind "limit" |> Option.bind (fun s -> match Int32.TryParse(s) with true, n -> Some (Math.Max(1, Math.Min(n, 250))) | _ -> None) |> Option.defaultValue 50
+
+                        let filter : TransactionListFilter = {
+                            AccountId = accountIdOpt
+                            From = fromOpt
+                            To = toOpt
+                            Status = statusOpt
+                            Limit = limit
+                            Cursor = None
+                        }
+                        let txns = txnRepo.ListAsync(filter).GetAwaiter().GetResult()
+                        let resp : TransactionListResponse = {
+                            items = txns |> List.map txnToResponse
+                            nextCursor = None
+                        }
                         [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(resp, McpProtocol.jsonOptions)); blob = None } ]
 
                     | ["transactions"; idStr] ->
@@ -527,7 +993,8 @@ module McpServer =
                             | None ->
                                 [ { uri = uri; mimeType = Some "text/plain"; text = Some "Transaction not found"; blob = None } ]
                             | Some txn ->
-                                [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(txn, McpProtocol.jsonOptions)); blob = None } ]
+                                let resp = txnToResponse txn
+                                [ { uri = uri; mimeType = Some "application/json"; text = Some(JsonSerializer.Serialize(resp, McpProtocol.jsonOptions)); blob = None } ]
 
                     | ["budgets"] ->
                         let budgetRepo = BudgetRepository.create factory accessor

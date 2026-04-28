@@ -110,6 +110,17 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
+builder.Services.AddScoped<ITransactionSplitRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    TransactionSplitRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAttachmentStorage>(fun sp ->
+    let log = sp.GetRequiredService<ILogger<LocalAttachmentStorage>>()
+    AttachmentStorage.fromEnvironment log) |> ignore
+builder.Services.AddScoped<IAttachmentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    AttachmentRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -523,6 +534,7 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
                       Status = TransactionStatus.Cleared
                       MatchConfidence = None
                       SyncEventId = syncEventIdOpt
+                      DeletedAt = None
                       CreatedAt = now
                       UpdatedAt = now }
 
@@ -658,6 +670,57 @@ let internalConnectionCredentialsHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson credsResponse ctx
     }
 
+// Shared sync trigger logic used by both the internal endpoint and the public API.
+let triggerSyncForConnectionAsync (http: HttpClient) (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) (connectionId: Guid) =
+    task {
+        let ctx =
+            match accessor.Context with
+            | Some c -> c
+            | None -> { TenantId = Guid.Empty; UserId = Guid.Empty }
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let! connOpt = connRepo.GetAsync(connectionId)
+        match connOpt with
+        | None -> return Error "Connection not found"
+        | Some conn ->
+            match DataFeedConnection.providerOf conn.Metadata with
+            | DataFeedProvider.Plaid ->
+                match plaidIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(ctx.TenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        return Error $"Plaid ingestion failed: {body}"
+                    else
+                        return Ok {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |}
+                | _ ->
+                    return Error "Plaid ingestion URL or service token not configured"
+            | DataFeedProvider.Akoya ->
+                match akoyaIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(ctx.TenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        return Error $"Akoya ingestion failed: {body}"
+                    else
+                        return Ok {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |}
+                | _ ->
+                    return Error "Akoya ingestion URL or service token not configured"
+            | _ ->
+                return Error "Provider not yet supported for sync trigger"
+    }
+
 // POST /internal/sync-trigger
 // Routes to the appropriate ingestion service based on the connection's provider.
 let syncTriggerHandler : HttpHandler = fun ctx ->
@@ -666,61 +729,33 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
         let root = doc.RootElement
         let tenantId = requireGuid root "tenantId"
         let connectionId = requireGuid root "connectionId"
-
         let accessor = makeManualAccessor tenantId
         let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
-        let connRepo = DataFeedConnectionRepository.create factory accessor
-        let! connOpt = connRepo.GetAsync(connectionId)
+        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
+        match result with
+        | Ok resp -> do! Response.ofJson resp ctx
+        | Error msg ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = msg |} ctx
+    }
 
-        match connOpt with
-        | None ->
+// POST /api/connections/{connectionId}/sync
+// Public sync trigger endpoint.
+let syncConnectionHandler (connectionId: Guid) : HttpHandler = fun ctx ->
+    task {
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
+        match result with
+        | Ok resp -> do! Response.ofJson resp ctx
+        | Error "Connection not found" ->
             ctx.Response.StatusCode <- 404
             do! Response.ofJson {| error = "Connection not found" |} ctx
-        | Some conn ->
-            match DataFeedConnection.providerOf conn.Metadata with
-            | DataFeedProvider.Plaid ->
-                match plaidIngestionUrl, serviceToken with
-                | Some url, Some token ->
-                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
-                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
-                    let payload = System.Text.Json.Nodes.JsonObject()
-                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
-                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
-                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
-                    let! resp = http.SendAsync(req)
-                    let! body = resp.Content.ReadAsStringAsync()
-                    if not resp.IsSuccessStatusCode then
-                        ctx.Response.StatusCode <- (int)resp.StatusCode
-                        do! Response.ofJson {| error = "Plaid ingestion failed"; detail = body |} ctx
-                    else
-                        do! Response.ofJson {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |} ctx
-                | _ ->
-                    ctx.Response.StatusCode <- 503
-                    do! Response.ofJson {| error = "Plaid ingestion URL or service token not configured" |} ctx
-            | DataFeedProvider.Akoya ->
-                match akoyaIngestionUrl, serviceToken with
-                | Some url, Some token ->
-                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
-                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
-                    let payload = System.Text.Json.Nodes.JsonObject()
-                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
-                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
-                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
-                    let! resp = http.SendAsync(req)
-                    let! body = resp.Content.ReadAsStringAsync()
-                    if not resp.IsSuccessStatusCode then
-                        ctx.Response.StatusCode <- (int)resp.StatusCode
-                        do! Response.ofJson {| error = "Akoya ingestion failed"; detail = body |} ctx
-                    else
-                        do! Response.ofJson {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |} ctx
-                | _ ->
-                    ctx.Response.StatusCode <- 503
-                    do! Response.ofJson {| error = "Akoya ingestion URL or service token not configured" |} ctx
-            | _ ->
-                ctx.Response.StatusCode <- 501
-                do! Response.ofJson {| error = "Provider not yet supported for sync trigger" |} ctx
+        | Error msg ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = msg |} ctx
     }
 
 // POST /webhooks/plaid
@@ -820,6 +855,55 @@ wapp.UseRouting()
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Categories
+        get "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.listCategoriesHandler)
+        get "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.getCategoryHandler categoryId ctx))
+        post "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.createCategoryHandler)
+        patch "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.updateCategoryHandler categoryId ctx))
+        delete "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.deleteCategoryHandler categoryId ctx))
+        // Transactions
+        get "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.listTransactionsHandler)
+        get "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.getTransactionHandler txnId ctx))
+        post "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.createTransactionHandler)
+        patch "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.updateTransactionHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.deleteTransactionHandler txnId ctx))
+        // Transaction splits
+        get "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.listSplitsHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.createSplitsHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitAttachmentEndpoints.deleteSplitHandler txnId splitId ctx))
+        // Transaction attachments
+        post "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitAttachmentEndpoints.uploadAttachmentHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits/{splitId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitAttachmentEndpoints.uploadSplitAttachmentHandler txnId splitId ctx))
+        get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            SplitAttachmentEndpoints.getAttachmentHandler attachmentId ctx))
+        delete "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            SplitAttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
@@ -842,6 +926,9 @@ wapp.UseRouting()
         post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
+        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            syncConnectionHandler connectionId ctx))
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
@@ -877,6 +964,13 @@ wapp.UseRouting()
         get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             BudgetEndpoints.getCurrentReportHandler budgetId ctx))
+        // Exports
+        get "/api/exports/transactions.csv" (AuthHelpers.requireAuth ExportEndpoints.exportTransactionsHandler)
+        get "/api/exports/accounts.csv" (AuthHelpers.requireAuth ExportEndpoints.exportAccountsHandler)
+        get "/api/exports/budgets/{budgetId:guid}/period/{periodId:guid}.csv" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            ExportEndpoints.exportBudgetPeriodHandler budgetId periodId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
         // Onboarding

@@ -64,7 +64,11 @@ let private makeCategory (tenantId: Guid) (userId: Guid) (name: string) =
         Name = name
         ParentCategoryId = None
         IsSystem = false
+        CurrencyCode = "USD"
+        RolloverEnabled = false
+        DeletedAt = None
         CreatedAt = DateTimeOffset.UtcNow
+        UpdatedAt = DateTimeOffset.UtcNow
     }
 
 let private makeContext (tenantId: Guid) (userId: Guid) =
@@ -238,7 +242,7 @@ type CategoryRepositoryTests() =
         }
 
     [<Fact>]
-    member _.``DeleteAsync removes a category``() =
+    member _.``DeleteAsync soft-deletes a category``() =
         task {
             if not (canConnect ()) then return () else
 
@@ -259,4 +263,141 @@ type CategoryRepositoryTests() =
 
             let! retrieved = repo.GetAsync(category.Id)
             test <@ retrieved |> Option.isNone @>
+
+            // Row still exists in DB (soft delete)
+            use conn = dataSource.OpenConnection()
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <- "SELECT deleted_at IS NOT NULL FROM categories WHERE id = $1"
+            cmd.Parameters.AddWithValue("$1", category.Id) |> ignore
+            let! result = cmd.ExecuteScalarAsync()
+            test <@ result :?> bool @>
+        }
+
+    [<Fact>]
+    member _.``WouldCreateCycleAsync detects direct self-reference``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let tenantId = Guid.NewGuid()
+            let userId = Guid.NewGuid()
+            use seedConn = dataSource.OpenConnection()
+            seedTenantAndUser seedConn tenantId userId
+
+            let repo = makeRepo factory (makeContext tenantId userId)
+            let! wouldCycle = repo.WouldCreateCycleAsync(Guid.NewGuid(), Guid.NewGuid())
+            test <@ not wouldCycle @>
+        }
+
+    [<Fact>]
+    member _.``WouldCreateCycleAsync detects indirect cycle``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let tenantId = Guid.NewGuid()
+            let userId = Guid.NewGuid()
+            use seedConn = dataSource.OpenConnection()
+            seedTenantAndUser seedConn tenantId userId
+
+            let repo = makeRepo factory (makeContext tenantId userId)
+            let catA = { makeCategory tenantId userId "A" with Id = Guid.NewGuid() }
+            let catB = { makeCategory tenantId userId "B" with Id = Guid.NewGuid(); ParentCategoryId = Some catA.Id }
+            let catC = { makeCategory tenantId userId "C" with Id = Guid.NewGuid(); ParentCategoryId = Some catB.Id }
+            let! _ = repo.CreateAsync(catA)
+            let! _ = repo.CreateAsync(catB)
+            let! _ = repo.CreateAsync(catC)
+
+            // C -> B -> A, trying to make A's parent = C would create a cycle
+            let! wouldCycle = repo.WouldCreateCycleAsync(catA.Id, catC.Id)
+            test <@ wouldCycle @>
+
+            // Non-cycle is fine
+            let! wouldCycle2 = repo.WouldCreateCycleAsync(catC.Id, catA.Id)
+            test <@ not wouldCycle2 @>
+        }
+
+    [<Fact>]
+    member _.``HasTransactionsAsync returns false for unused category``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let tenantId = Guid.NewGuid()
+            let userId = Guid.NewGuid()
+            use seedConn = dataSource.OpenConnection()
+            seedTenantAndUser seedConn tenantId userId
+
+            let category = makeCategory tenantId userId "Groceries"
+            let repo = makeRepo factory (makeContext tenantId userId)
+            let! _ = repo.CreateAsync(category)
+            let! hasTxns = repo.HasTransactionsAsync(category.Id)
+            test <@ not hasTxns @>
+        }
+
+    [<Fact>]
+    member _.``ReassignTransactionsAsync migrates category references``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let tenantId = Guid.NewGuid()
+            let userId = Guid.NewGuid()
+            use seedConn = dataSource.OpenConnection()
+            seedTenantAndUser seedConn tenantId userId
+
+            // Seed an account for transactions
+            use accCmd = seedConn.CreateCommand()
+            accCmd.CommandText <-
+                """INSERT INTO accounts (id, tenant_id, user_id, name, account_type, currency, is_on_budget, is_active, created_at, updated_at)
+                   VALUES ($1, $2, $3, 'Checking', 'checking', 'USD', true, true, now(), now())"""
+            let accountId = Guid.NewGuid()
+            accCmd.Parameters.AddWithValue("$1", accountId) |> ignore
+            accCmd.Parameters.AddWithValue("$2", tenantId) |> ignore
+            accCmd.Parameters.AddWithValue("$3", userId) |> ignore
+            accCmd.ExecuteNonQuery() |> ignore
+
+            let catFrom = makeCategory tenantId userId "From"
+            let catTo = makeCategory tenantId userId "To"
+            let repo = makeRepo factory (makeContext tenantId userId)
+            let! _ = repo.CreateAsync(catFrom)
+            let! _ = repo.CreateAsync(catTo)
+
+            // Seed a transaction with catFrom
+            use txnCmd = seedConn.CreateCommand()
+            txnCmd.CommandText <-
+                """INSERT INTO transactions (
+                       id, tenant_id, account_id, occurred_at, amount_minor, currency,
+                       description, source, status, category_id, created_at, updated_at
+                   ) VALUES ($1, $2, $3, now(), 100, 'USD', 'Test', '{"type":"manual"}'::jsonb, 'cleared', $4, now(), now())"""
+            let txnId = Guid.NewGuid()
+            txnCmd.Parameters.AddWithValue("$1", txnId) |> ignore
+            txnCmd.Parameters.AddWithValue("$2", tenantId) |> ignore
+            txnCmd.Parameters.AddWithValue("$3", accountId) |> ignore
+            txnCmd.Parameters.AddWithValue("$4", catFrom.Id) |> ignore
+            txnCmd.ExecuteNonQuery() |> ignore
+
+            let! hasBefore = repo.HasTransactionsAsync(catFrom.Id)
+            test <@ hasBefore @>
+
+            do! repo.ReassignTransactionsAsync(catFrom.Id, catTo.Id)
+
+            let! hasAfter = repo.HasTransactionsAsync(catFrom.Id)
+            test <@ not hasAfter @>
         }

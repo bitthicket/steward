@@ -353,6 +353,32 @@ module Auth =
                 | Ok created ->
                     let onboardingCtx = { TenantId = created.TenantId; UserId = created.UserId }
                     do! OnboardingRepository.createInitialAsync factory onboardingCtx created.TenantId
+
+                    // Seed default categories for the new tenant
+                    let now = DateTimeOffset.UtcNow
+                    let defaultCategories = [
+                        "Income"; "Housing"; "Food"; "Transportation"; "Savings"; "Uncategorized"
+                    ]
+                    let manualAccessor =
+                        { new ITenantContextAccessor with
+                            member _.Context = Some { TenantId = created.TenantId; UserId = created.UserId } }
+                    let categoryRepo = CategoryRepository.create factory manualAccessor
+                    for name in defaultCategories do
+                        let category: Category = {
+                            Id = Guid.NewGuid()
+                            TenantId = created.TenantId
+                            UserId = created.UserId
+                            Name = name
+                            ParentCategoryId = None
+                            IsSystem = true
+                            CurrencyCode = "USD"
+                            RolloverEnabled = false
+                            DeletedAt = None
+                            CreatedAt = now
+                            UpdatedAt = now
+                        }
+                        do! categoryRepo.CreateAsync(category) :> Task
+
                     let token =
                         Jwt.createToken config.JwtSecret config.Issuer config.Audience [
                             "sub", created.UserId.ToString()

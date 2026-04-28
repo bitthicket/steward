@@ -16,13 +16,17 @@
     <Compile Include="AccountRepositoryTests.fs" />
     <Compile Include="AccountEndpointsTests.fs" />
     <Compile Include="CategoryRepositoryTests.fs" />
+    <Compile Include="CategoryEndpointsTests.fs" />
     <Compile Include="TransactionRepositoryTests.fs" />
     <Compile Include="TransactionMatcherTests.fs" />
+    <Compile Include="TransactionEndpointsTests.fs" />
+    <Compile Include="SplitAttachmentEndpointsTests.fs" />
     <Compile Include="ReconciliationRepositoryTests.fs" />
     <Compile Include="ReconciliationEndpointsTests.fs" />
     <Compile Include="BudgetRepositoryTests.fs" />
     <Compile Include="BudgetPeriodRepositoryTests.fs" />
     <Compile Include="BudgetReportTests.fs" />
+    <Compile Include="ExportEndpointsTests.fs" />
     <Compile Include="DataFeedConnectionRepositoryTests.fs" />
     <Compile Include="FeedHealthWorkerTests.fs" />
     <Compile Include="RemediationAttemptRepositoryTests.fs" />
@@ -30,6 +34,8 @@
     <Compile Include="MoneyTests.fs" />
     <Compile Include="UserPreferencesEndpointsTests.fs" />
     <Compile Include="VaultServiceTests.fs" />
+    <Compile Include="McpResourcesTests.fs" />
+    <Compile Include="McpToolsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

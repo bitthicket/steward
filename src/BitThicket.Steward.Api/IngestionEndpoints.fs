@@ -146,6 +146,7 @@ module IngestionEndpoints =
                                         TransferAccountId = None
                                         MatchConfidence = None
                                         SyncEventId = None
+                                        DeletedAt = None
                                         PostedAt = dto.postedAt
                                         OccurredAt = dto.occurredAt
                                         CreatedAt = now

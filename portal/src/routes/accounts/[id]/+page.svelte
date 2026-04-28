@@ -20,7 +20,7 @@
 		}
 	});
 
-	const accountId = $derived($page.params.id);
+	const accountId = $derived($page.params.id!);
 
 	let account = $state<Account | null>(null);
 	let balance = $state<{ posted: number; available: number; pending: number; currency: string } | null>(null);
