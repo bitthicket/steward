@@ -78,9 +78,7 @@ let private createHttpContext (factory: IDbConnectionFactory) =
         let f = sp.GetRequiredService<IDbConnectionFactory>()
         let accessor = sp.GetRequiredService<ITenantContextAccessor>()
         BudgetPeriodRepository.create f accessor) |> ignore
-    services.AddSingleton<IAttachmentStorage>(fun sp ->
-        let log = sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<LocalAttachmentStorage>>()
-        AttachmentStorage.fromEnvironment log) |> ignore
+    services.AddSingleton<IAttachmentStorage>(LocalAttachmentStorage.create()) |> ignore
     services.AddSingleton<IAttachmentRepository>(fun sp ->
         let f = sp.GetRequiredService<IDbConnectionFactory>()
         let accessor = sp.GetRequiredService<ITenantContextAccessor>()

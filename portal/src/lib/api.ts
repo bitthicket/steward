@@ -4,6 +4,8 @@ import type {
 	Account,
 	Balance,
 	Transaction,
+	TransactionSplit,
+	Attachment,
 	DataFeedConnection,
 	Category
 } from './types';
@@ -175,10 +177,102 @@ export async function deleteTransaction(id: string) {
 	return api<void>(`/api/transactions/${id}`, { method: 'DELETE' });
 }
 
+// ── Splits ─────────────────────────────────────────────────────────────────
+
+export async function listSplits(transactionId: string) {
+	return api<{ splits: TransactionSplit[] }>(`/api/transactions/${transactionId}/splits`);
+}
+
+export async function createSplit(
+	transactionId: string,
+	data: {
+		amountMinor: number;
+		currency: string;
+		categoryId?: string;
+		description?: string;
+		memo?: string;
+		sortOrder?: number;
+	}
+) {
+	return api<TransactionSplit>(`/api/transactions/${transactionId}/splits`, {
+		method: 'POST',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function updateSplit(
+	transactionId: string,
+	splitId: string,
+	data: {
+		amountMinor?: number;
+		currency?: string;
+		categoryId?: string | null;
+		description?: string | null;
+		memo?: string | null;
+		sortOrder?: number;
+	}
+) {
+	return api<TransactionSplit>(`/api/transactions/${transactionId}/splits/${splitId}`, {
+		method: 'PATCH',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function deleteSplit(transactionId: string, splitId: string) {
+	return api<void>(`/api/transactions/${transactionId}/splits/${splitId}`, { method: 'DELETE' });
+}
+
+// ── Attachments ────────────────────────────────────────────────────────────
+
+export async function listTransactionAttachments(transactionId: string) {
+	return api<{ attachments: Attachment[] }>(`/api/transactions/${transactionId}/attachments`);
+}
+
+export async function uploadTransactionAttachment(
+	transactionId: string,
+	file: File,
+	kind: string = 'other'
+) {
+	const form = new FormData();
+	form.append('file', file);
+	form.append('kind', kind);
+	return api<Attachment>(`/api/transactions/${transactionId}/attachments`, {
+		method: 'POST',
+		body: form
+	});
+}
+
+export async function uploadSplitAttachment(
+	transactionId: string,
+	splitId: string,
+	file: File,
+	kind: string = 'other'
+) {
+	const form = new FormData();
+	form.append('file', file);
+	form.append('kind', kind);
+	return api<Attachment>(`/api/transactions/${transactionId}/splits/${splitId}/attachments`, {
+		method: 'POST',
+		body: form
+	});
+}
+
+export function getAttachmentUrl(attachmentId: string) {
+	return `/api/attachments/${attachmentId}`;
+}
+
+export async function deleteAttachment(attachmentId: string) {
+	return api<void>(`/api/attachments/${attachmentId}`, { method: 'DELETE' });
+}
+
 // ── Connections ────────────────────────────────────────────────────────────
 
 export async function listConnections() {
 	return api<{ connections: DataFeedConnection[] }>('/api/connections');
+}
+
+export async function listCategories() {
+	return api<{ categories: Category[] }>('/api/categories');
 }
 
 // ── Onboarding ─────────────────────────────────────────────────────────────

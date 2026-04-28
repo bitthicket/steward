@@ -10,6 +10,7 @@ open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Http
+open Microsoft.AspNetCore.Http.Features
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.FileProviders
 open Microsoft.Extensions.Logging
@@ -100,6 +101,10 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(fun (opts: Micr
 
 let dataSource = NpgsqlDataSource.Create(connectionString)
 builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
+builder.Services.Configure<FormOptions>(fun (opts: FormOptions) ->
+    opts.MultipartBodyLengthLimit <- int64 (10 * 1024 * 1024)
+    opts.ValueLengthLimit <- 10 * 1024 * 1024
+) |> ignore
 TenantContextServices.register builder.Services |> ignore
 AuthServices.register builder.Services { JwtSecret = jwtSecret; JwtSecretPrevious = jwtSecretPrevious; Issuer = jwtIssuer; Audience = jwtAudience } |> ignore
 builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
@@ -107,20 +112,18 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     TransactionRepository.create factory accessor) |> ignore
-builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
-    let repo = sp.GetRequiredService<ITransactionRepository>()
-    TransactionMatcher.create repo) |> ignore
-builder.Services.AddScoped<ITransactionSplitRepository>(fun sp ->
+builder.Services.AddScoped<ISplitRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
-    TransactionSplitRepository.create factory accessor) |> ignore
-builder.Services.AddSingleton<IAttachmentStorage>(fun sp ->
-    let log = sp.GetRequiredService<ILogger<LocalAttachmentStorage>>()
-    AttachmentStorage.fromEnvironment log) |> ignore
+    SplitRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IAttachmentRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     AttachmentRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAttachmentStorage>(LocalAttachmentStorage.create()) |> ignore
+builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
+    let repo = sp.GetRequiredService<ITransactionRepository>()
+    TransactionMatcher.create repo) |> ignore
 builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -865,31 +868,38 @@ wapp.UseRouting()
         delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             TransactionEndpoints.deleteTransactionHandler txnId ctx))
-        // Transaction splits
+        // Splits
         get "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
-            SplitAttachmentEndpoints.listSplitsHandler txnId ctx))
+            SplitEndpoints.listSplitsHandler txnId ctx))
         post "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
-            SplitAttachmentEndpoints.createSplitsHandler txnId ctx))
+            SplitEndpoints.createSplitHandler txnId ctx))
+        patch "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitEndpoints.updateSplitHandler txnId splitId ctx))
         delete "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
-            SplitAttachmentEndpoints.deleteSplitHandler txnId splitId ctx))
-        // Transaction attachments
+            SplitEndpoints.deleteSplitHandler txnId splitId ctx))
+        // Attachments
         post "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
-            SplitAttachmentEndpoints.uploadAttachmentHandler txnId ctx))
+            AttachmentEndpoints.createTransactionAttachmentHandler txnId ctx))
         post "/api/transactions/{txnId:guid}/splits/{splitId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
             let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
             let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
-            SplitAttachmentEndpoints.uploadSplitAttachmentHandler txnId splitId ctx))
+            AttachmentEndpoints.createSplitAttachmentHandler txnId splitId ctx))
+        get "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            AttachmentEndpoints.listTransactionAttachmentsHandler txnId ctx))
         get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
-            SplitAttachmentEndpoints.getAttachmentHandler attachmentId ctx))
+            AttachmentEndpoints.getAttachmentHandler attachmentId ctx))
         delete "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
-            SplitAttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
+            AttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
         // Connections
         get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
         get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
