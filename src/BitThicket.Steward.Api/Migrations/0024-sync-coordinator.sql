@@ -79,7 +79,7 @@ AS $$
     WHERE (dfc.status->>'Case') = 'Active'
       AND (
           dfc.last_synced_at IS NULL
-          OR dfc.last_synced_at + GREATEST(dfc.preferred_sync_frequency, '15 minutes'::interval)
+          OR dfc.last_synced_at + LEAST(GREATEST(dfc.preferred_sync_frequency, '15 minutes'::interval), '24 hours'::interval)
              <= now()
       );
 $$;

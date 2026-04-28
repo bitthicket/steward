@@ -90,6 +90,7 @@ type InProcessEventBus(logger: ILogger<InProcessEventBus>) =
             { new IDisposable with
                 member _.Dispose() =
                     cts.Cancel()
+                    cts.Dispose()
                     topicSubs.TryRemove(subId) |> ignore
                     if topicSubs.IsEmpty then
                         subscribers.TryRemove(topic) |> ignore
