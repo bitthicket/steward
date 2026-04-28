@@ -22,6 +22,7 @@
     <Compile Include="AttachmentEndpoints.fs" />
     <Compile Include="ReconciliationRepository.fs" />
     <Compile Include="VaultService.fs" />
+    <Compile Include="EventBus.fs" />
     <Compile Include="DataFeedConnectionRepository.fs" />
     <Compile Include="SyncEventRepository.fs" />
     <Compile Include="PlaidService.fs" />
@@ -29,6 +30,7 @@
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
     <Compile Include="UserPreferencesRepository.fs" />
+    <Compile Include="OnboardingRepository.fs" />
     <Compile Include="ApiKeyRepository.fs" />
     <Compile Include="FeedHealthRepository.fs" />
     <Compile Include="RemediationAttemptRepository.fs" />
@@ -45,6 +47,7 @@
     <Compile Include="PricingWorker.fs" />
     <Compile Include="FeedHealthWorker.fs" />
     <Compile Include="AkoyaTokenRefreshWorker.fs" />
+    <Compile Include="SyncCoordinator.fs" />
     <Compile Include="Logging.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

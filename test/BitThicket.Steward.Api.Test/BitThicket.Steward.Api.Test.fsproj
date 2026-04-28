@@ -40,6 +40,9 @@
     <Compile Include="VaultServiceTests.fs" />
     <Compile Include="McpResourcesTests.fs" />
     <Compile Include="McpToolsTests.fs" />
+    <Compile Include="EventBusTests.fs" />
+    <Compile Include="SyncCoordinatorTests.fs" />
+    <Compile Include="ConnectionSyncTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

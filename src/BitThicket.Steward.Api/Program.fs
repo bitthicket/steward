@@ -175,6 +175,10 @@ builder.Services.AddScoped<IUserPreferencesRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     UserPreferencesRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IOnboardingRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    OnboardingRepository.create factory accessor) |> ignore
 builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let config = PlaidConfig.fromEnvironment()
     let http = sp.GetRequiredService<HttpClient>()
@@ -189,6 +193,10 @@ builder.Services.AddSingleton<IAkoyaOAuthService>(fun sp ->
     let vault = sp.GetRequiredService<IVaultService>()
     let log = sp.GetRequiredService<ILogger<AkoyaOAuthService>>()
     AkoyaOAuthService(config, http, factory, vault, log) :> IAkoyaOAuthService) |> ignore
+builder.Services.AddSingleton<IEventBus>(fun sp ->
+    let log = sp.GetRequiredService<ILogger<InProcessEventBus>>()
+    InProcessEventBus(log) :> IEventBus) |> ignore
+builder.Services.AddHostedService<SyncCoordinator>() |> ignore
 builder.Services.AddHostedService<PricingWorker>() |> ignore
 builder.Services.AddHostedService<FeedHealthWorker>() |> ignore
 builder.Services.AddHostedService<AkoyaTokenRefreshWorker>() |> ignore
@@ -242,6 +250,29 @@ let requireInt64 (el: JsonElement) (name: string) =
 let makeManualAccessor (tenantId: Guid) : ITenantContextAccessor =
     { new ITenantContextAccessor with
         member _.Context = Some { TenantId = tenantId; UserId = Guid.Empty } }
+
+let requireServiceToken (serviceToken: string option) (next: HttpHandler) : HttpHandler = fun ctx ->
+    task {
+        match serviceToken with
+        | None ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = "Service token not configured" |} ctx
+        | Some expected ->
+            let header =
+                match ctx.Request.Headers.TryGetValue("Authorization") with
+                | true, v when v.Count > 0 -> v.ToString()
+                | _ -> ""
+            let token =
+                if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
+                    header.Substring(7)
+                else
+                    ""
+            if token <> expected then
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            else
+                do! next ctx
+    }
 
 // ── Route handlers ─────────────────────────────────────────────────────────────
 
@@ -359,6 +390,69 @@ let resolveHandler : HttpHandler = fun ctx ->
             | _ ->
                 ctx.Response.StatusCode <- 400
                 do! Response.ofJson {| error = "Invalid action; expected 'accept' or 'reject'" |} ctx
+    }
+
+// GET /api/onboarding
+let getOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let tc = accessor.Context.Value
+        let! stateOpt = repo.GetAsync(tc.TenantId)
+        match stateOpt with
+        | None ->
+            ctx.Response.StatusCode <- 404
+            do! Response.ofJson {| error = "Onboarding state not found" |} ctx
+        | Some state ->
+            let respJson =
+                let n = System.Text.Json.Nodes.JsonObject()
+                n["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(state.TenantId.ToString())
+                n["currentStep"] <- System.Text.Json.Nodes.JsonValue.Create(state.CurrentStep)
+                n["startedAt"] <- System.Text.Json.Nodes.JsonValue.Create(state.StartedAt.ToString("O"))
+                match state.CompletedAt with
+                | Some dt -> n["completedAt"] <- System.Text.Json.Nodes.JsonValue.Create(dt.ToString("O"))
+                | None -> n["completedAt"] <- null
+                let arr = System.Text.Json.Nodes.JsonArray()
+                for i in state.CompletedSteps do arr.Add(System.Text.Json.Nodes.JsonValue.Create(i))
+                n["completedSteps"] <- arr
+                n["skipped"] <- System.Text.Json.Nodes.JsonValue.Create(state.Skipped)
+                n
+            do! Response.ofJson respJson ctx
+    }
+
+// PATCH /api/onboarding
+let patchOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let currentStep = root.GetProperty("currentStep").GetInt32()
+        let skipped =
+            match root.TryGetProperty("skipped") with
+            | true, el when el.ValueKind = JsonValueKind.True -> true
+            | _ -> false
+        let completedSteps =
+            match root.TryGetProperty("completedSteps") with
+            | true, el when el.ValueKind = JsonValueKind.Array ->
+                el.EnumerateArray() |> Seq.map (fun e -> e.GetInt32()) |> Seq.toList
+            | _ -> []
+        let tc = accessor.Context.Value
+        let! existingOpt = repo.GetAsync(tc.TenantId)
+        let startedAt =
+            match existingOpt with
+            | Some existing -> existing.StartedAt
+            | None -> DateTimeOffset.UtcNow
+        let state = {
+            TenantId = tc.TenantId
+            CurrentStep = currentStep
+            StartedAt = startedAt
+            CompletedAt = if currentStep >= 5 then Some DateTimeOffset.UtcNow else None
+            CompletedSteps = completedSteps
+            Skipped = skipped
+        }
+        do! repo.UpsertAsync(state)
+        do! Response.ofJson {| status = "updated" |} ctx
     }
 
 // POST /internal/transactions/upsert
@@ -653,24 +747,6 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
             do! Response.ofJson {| error = msg |} ctx
     }
 
-// POST /api/connections/{connectionId}/sync
-// Public sync trigger endpoint.
-let syncConnectionHandler (connectionId: Guid) : HttpHandler = fun ctx ->
-    task {
-        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
-        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
-        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
-        match result with
-        | Ok resp -> do! Response.ofJson resp ctx
-        | Error "Connection not found" ->
-            ctx.Response.StatusCode <- 404
-            do! Response.ofJson {| error = "Connection not found" |} ctx
-        | Error msg ->
-            ctx.Response.StatusCode <- 503
-            do! Response.ofJson {| error = msg |} ctx
-    }
-
 // POST /webhooks/plaid
 let plaidWebhookHandler : HttpHandler = fun ctx ->
     task {
@@ -846,15 +922,12 @@ wapp.UseRouting()
         post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
-        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
-            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
-            syncConnectionHandler connectionId ctx))
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
         post "/internal/transactions/remove" internalTransactionsRemoveHandler
         post "/internal/connections/status" internalConnectionStatusHandler
-        get "/internal/connections/{connectionId:guid}/credentials" internalConnectionCredentialsHandler
+        get "/internal/connections/{connectionId:guid}/credentials" (requireServiceToken serviceToken internalConnectionCredentialsHandler)
         post "/internal/sync-trigger" syncTriggerHandler
         post "/webhooks/plaid" plaidWebhookHandler
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
@@ -893,6 +966,9 @@ wapp.UseRouting()
             ExportEndpoints.exportBudgetPeriodHandler budgetId periodId ctx))
         get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
         patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
+        // Onboarding
+        get "/api/onboarding" (AuthHelpers.requireAuth getOnboardingHandler)
+        patch "/api/onboarding" (AuthHelpers.requireAuth patchOnboardingHandler)
         // Reconciliations
         post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
         get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->
@@ -915,6 +991,33 @@ wapp.UseRouting()
         delete "/api/api-keys/{keyId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let keyId = ctx.Request.RouteValues.["keyId"] :?> Guid
             Auth.revokeApiKeyHandler keyId ctx))
+        // Data feed connections
+        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            task {
+                let connRepo = ctx.RequestServices.GetRequiredService<IDataFeedConnectionRepository>()
+                let bus = ctx.RequestServices.GetRequiredService<IEventBus>()
+                let! connOpt = connRepo.GetAsync(connectionId)
+                match connOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "Connection not found" |} ctx
+                | Some conn ->
+                    let predictedSyncEventId = Guid.NewGuid()
+                    let payload =
+                        {| tenantId = conn.TenantId
+                           connectionId = conn.Id
+                           accountId = (None : Guid option) |}
+                    let json = System.Text.Json.JsonSerializer.Serialize(payload)
+                    let envelope =
+                        { Topic = EventBusTopics.syncRequested
+                          JsonPayload = json
+                          OccurredAt = DateTimeOffset.UtcNow
+                          CausationId = None }
+                    do! bus.Publish(envelope)
+                    ctx.Response.StatusCode <- 202
+                    do! Response.ofJson {| syncEventId = predictedSyncEventId |} ctx
+            }))
         // MCP server route group
         post "/mcp" (AuthHelpers.requireAuth McpServer.mcpHandler)
         // SPA fallthrough for portal routes

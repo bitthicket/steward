@@ -306,7 +306,6 @@ let syncTriggerHandler (client: IPlaidClient) (http: HttpClient) (logger: ILogge
                         let updated =
                             match doc.RootElement.TryGetProperty("updated") with
                             | true, p -> p.GetInt32()
-                            | _ -> 0
                         upsertedCount <- created + updated
                     with _ ->
                         upsertedCount <- allNormalized.Length
@@ -345,7 +344,10 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{config.Port}") |> ignore
 builder.Services.AddSingleton<HttpClient>(new HttpClient()) |> ignore
 builder.Services.AddSingleton<IPlaidClient>(fun sp ->
     let http = sp.GetRequiredService<HttpClient>()
-    StubPlaidClient(config, http) :> IPlaidClient) |> ignore
+    if config.UseStub then
+        StubPlaidClient(config, http) :> IPlaidClient
+    else
+        failwith "Real PlaidClient not yet implemented. Set PLAID_USE_STUB=true for testing.") |> ignore
 
 let wapp = builder.Build()
 
