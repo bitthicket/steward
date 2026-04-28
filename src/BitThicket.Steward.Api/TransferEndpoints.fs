@@ -6,6 +6,8 @@ open System.Text.Json
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Npgsql
+open NpgsqlTypes
 open Falco
 open BitThicket.Steward.Api.Domain
 
@@ -78,6 +80,11 @@ module private MoneyHelper =
         let factor = pown 10m places
         { Amount = decimal minor / factor; CurrencyCode = currencyCode }
 
+    let toMinor (money: Money) : int64 =
+        let places = decimalPlaces money.CurrencyCode
+        let factor = pown 10m places
+        int64 (Decimal.Round(money.Amount * factor))
+
 // ── Domain helpers ─────────────────────────────────────────────────────────
 
 module private TransferHelpers =
@@ -89,12 +96,12 @@ module private TransferHelpers =
         | PaymentType.FullBalance      -> "fullBalance"
 
     let paymentTypeFromString (s: string) : PaymentType option =
-        match s.ToLowerInvariant() with
-        | "statementbalance" -> Some PaymentType.StatementBalance
-        | "minimumpayment"   -> Some PaymentType.MinimumPayment
-        | "custom"           -> Some PaymentType.CustomAmount
-        | "fullbalance"      -> Some PaymentType.FullBalance
-        | _                  -> None
+        match s with
+        | "statementBalance" | "statementbalance" | "statement_balance" -> Some PaymentType.StatementBalance
+        | "minimumPayment" | "minimumpayment" | "minimum_payment" | "minimum" -> Some PaymentType.MinimumPayment
+        | "custom" | "customAmount" | "customamount" | "custom_amount" -> Some PaymentType.CustomAmount
+        | "fullBalance" | "fullbalance" | "full_balance" -> Some PaymentType.FullBalance
+        | _ -> None
 
     let ccPaymentToResponse (p: CreditCardPayment) : CreditCardPaymentResponse =
         {
@@ -110,6 +117,98 @@ module private TransferHelpers =
             createdAt = p.CreatedAt
         }
 
+// ── Raw SQL helpers for atomic multi-insert operations ─────────────────────
+
+module private AtomicSql =
+    let addNullableGuid (cmd: NpgsqlCommand) (name: string) (value: Guid option) =
+        match value with
+        | Some v -> cmd.Parameters.AddWithValue(name, v) |> ignore
+        | None -> cmd.Parameters.AddWithValue(name, DBNull.Value) |> ignore
+
+    let addNullableDateTime (cmd: NpgsqlCommand) (name: string) (value: DateTimeOffset option) =
+        match value with
+        | Some v -> cmd.Parameters.AddWithValue(name, v.UtcDateTime) |> ignore
+        | None -> cmd.Parameters.AddWithValue(name, DBNull.Value) |> ignore
+
+    let addNullableString (cmd: NpgsqlCommand) (name: string) (value: string option) =
+        match value with
+        | Some v -> cmd.Parameters.AddWithValue(name, v) |> ignore
+        | None -> cmd.Parameters.AddWithValue(name, DBNull.Value) |> ignore
+
+    let insertTransaction (conn: NpgsqlConnection) (tx: NpgsqlTransaction) (txn: Transaction) =
+        task {
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <-
+                """INSERT INTO transactions (
+                       id, tenant_id, account_id, occurred_at, posted_at,
+                       amount_minor, currency, description, merchant, memo,
+                       category_id, source, external_id, matched_transaction_id, transfer_account_id,
+                       status, match_confidence, sync_event_id, created_at, updated_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"""
+            cmd.Parameters.AddWithValue("$1", txn.Id) |> ignore
+            cmd.Parameters.AddWithValue("$2", txn.TenantId) |> ignore
+            cmd.Parameters.AddWithValue("$3", txn.AccountId) |> ignore
+            addNullableDateTime cmd "$4" (Some txn.OccurredAt)
+            addNullableDateTime cmd "$5" txn.PostedAt
+            cmd.Parameters.AddWithValue("$6", MoneyHelper.toMinor txn.Amount) |> ignore
+            cmd.Parameters.AddWithValue("$7", txn.Amount.CurrencyCode) |> ignore
+            cmd.Parameters.AddWithValue("$8", txn.Description) |> ignore
+            addNullableString cmd "$9" txn.Merchant
+            addNullableString cmd "$10" txn.Memo
+            addNullableGuid cmd "$11" txn.CategoryId
+            let sourceParam = cmd.CreateParameter()
+            sourceParam.ParameterName <- "$12"
+            sourceParam.NpgsqlDbType <- NpgsqlDbType.Jsonb
+            sourceParam.Value <-
+                match txn.Source with
+                | TransactionSource.Manual -> box """{"type":"manual"}"""
+                | TransactionSource.DataFeed provider -> box $"""{{"type":"data_feed","provider":"{provider}"}}"""
+                | TransactionSource.Import format -> box $"""{{"type":"import","format":"{format}"}}"""
+            cmd.Parameters.Add(sourceParam) |> ignore
+            addNullableString cmd "$13" txn.ExternalId
+            addNullableGuid cmd "$14" txn.MatchedTransactionId
+            addNullableGuid cmd "$15" txn.TransferAccountId
+            cmd.Parameters.AddWithValue("$16", "cleared") |> ignore
+            match txn.MatchConfidence with
+            | Some c -> cmd.Parameters.AddWithValue("$17", c) |> ignore
+            | None -> cmd.Parameters.AddWithValue("$17", DBNull.Value) |> ignore
+            addNullableGuid cmd "$18" txn.SyncEventId
+            cmd.Parameters.AddWithValue("$19", txn.CreatedAt.UtcDateTime) |> ignore
+            cmd.Parameters.AddWithValue("$20", txn.UpdatedAt.UtcDateTime) |> ignore
+            let! _ = cmd.ExecuteNonQueryAsync()
+            return txn.Id
+        }
+
+    let insertCreditCardPayment (conn: NpgsqlConnection) (tx: NpgsqlTransaction) (payment: CreditCardPayment) =
+        task {
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <-
+                """INSERT INTO credit_card_payments (
+                       id, tenant_id, credit_card_account_id, funding_account_id,
+                       amount_minor, currency, payment_type, scheduled_date, paid_at,
+                       debit_transaction_id, credit_transaction_id, created_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"""
+            cmd.Parameters.AddWithValue("$1", payment.Id) |> ignore
+            cmd.Parameters.AddWithValue("$2", payment.TenantId) |> ignore
+            cmd.Parameters.AddWithValue("$3", payment.CreditCardAccountId) |> ignore
+            cmd.Parameters.AddWithValue("$4", payment.FundingAccountId) |> ignore
+            cmd.Parameters.AddWithValue("$5", MoneyHelper.toMinor payment.Amount) |> ignore
+            cmd.Parameters.AddWithValue("$6", payment.Amount.CurrencyCode) |> ignore
+            cmd.Parameters.AddWithValue("$7", TransferHelpers.paymentTypeToString payment.PaymentType) |> ignore
+            match payment.ScheduledDate with
+            | Some d -> cmd.Parameters.AddWithValue("$8", d.ToDateTime(TimeOnly.MinValue)) |> ignore
+            | None -> cmd.Parameters.AddWithValue("$8", DBNull.Value) |> ignore
+            addNullableDateTime cmd "$9" payment.PaidAt
+            addNullableGuid cmd "$10" payment.DebitTransactionId
+            addNullableGuid cmd "$11" payment.CreditTransactionId
+            cmd.Parameters.AddWithValue("$12", payment.CreatedAt.UtcDateTime) |> ignore
+            let! _ = cmd.ExecuteNonQueryAsync()
+            return payment.Id
+        }
+
 // ── Endpoints ──────────────────────────────────────────────────────────────
 
 module TransferEndpoints =
@@ -118,7 +217,7 @@ module TransferEndpoints =
     // POST /api/transfers
     let createTransferHandler : HttpHandler = fun ctx ->
         task {
-            let txnRepo = ctx.RequestServices.GetRequiredService<ITransactionRepository>()
+            let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
             let accountRepo = ctx.RequestServices.GetRequiredService<IAccountRepository>()
             let! doc = TransferJson.readBody ctx
             let req = TransferJson.deserialize<CreateTransferRequest> doc
@@ -176,7 +275,7 @@ module TransferEndpoints =
                             Source = TransactionSource.Manual
                             ExternalId = None
                             MatchedTransactionId = None
-                            TransferAccountId = Some creditId
+                            TransferAccountId = Some req.toAccountId
                             MatchConfidence = None
                             SyncEventId = None
                             CreatedAt = now
@@ -198,30 +297,37 @@ module TransferEndpoints =
                             Source = TransactionSource.Manual
                             ExternalId = None
                             MatchedTransactionId = None
-                            TransferAccountId = Some debitId
+                            TransferAccountId = Some req.fromAccountId
                             MatchConfidence = None
                             SyncEventId = None
                             CreatedAt = now
                             UpdatedAt = now
                         }
 
-                        let! _ = txnRepo.CreateAsync(debitTxn)
-                        let! _ = txnRepo.CreateAsync(creditTxn)
+                        use! conn = factory.OpenForTenantAsync(tc)
+                        use tx = conn.BeginTransaction()
+                        try
+                            let! _ = AtomicSql.insertTransaction conn tx debitTxn
+                            let! _ = AtomicSql.insertTransaction conn tx creditTxn
+                            do! tx.CommitAsync()
 
-                        let resp: TransferResponse = {
-                            debitTransactionId = debitId
-                            creditTransactionId = creditId
-                        }
-                        ctx.Response.StatusCode <- 201
-                        do! Response.ofJson resp ctx
+                            let resp: TransferResponse = {
+                                debitTransactionId = debitId
+                                creditTransactionId = creditId
+                            }
+                            ctx.Response.StatusCode <- 201
+                            do! Response.ofJson resp ctx
+                        with ex ->
+                            do! tx.RollbackAsync()
+                            ctx.Response.StatusCode <- 500
+                            do! Response.ofJson {| error = "Transfer creation failed" |} ctx
         }
 
     // POST /api/credit-card-payments
     let createCreditCardPaymentHandler : HttpHandler = fun ctx ->
         task {
-            let paymentRepo = ctx.RequestServices.GetRequiredService<ICreditCardPaymentRepository>()
+            let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
             let accountRepo = ctx.RequestServices.GetRequiredService<IAccountRepository>()
-            let txnRepo = ctx.RequestServices.GetRequiredService<ITransactionRepository>()
             let! doc = TransferJson.readBody ctx
             let req = TransferJson.deserialize<CreateCreditCardPaymentRequest> doc
 
@@ -271,77 +377,86 @@ module TransferEndpoints =
                             let mutable debitTxnId = None
                             let mutable creditTxnId = None
 
-                            if isImmediate then
-                                let debitId = Guid.NewGuid()
-                                let creditId = Guid.NewGuid()
-                                let absAmount = Math.Abs(paymentMoney.Amount)
+                            use! conn = factory.OpenForTenantAsync(tc)
+                            use tx = conn.BeginTransaction()
+                            try
+                                if isImmediate then
+                                    let debitId = Guid.NewGuid()
+                                    let creditId = Guid.NewGuid()
+                                    let absAmount = Math.Abs(paymentMoney.Amount)
 
-                                let debitTxn: Transaction = {
-                                    Id = debitId
+                                    let debitTxn: Transaction = {
+                                        Id = debitId
+                                        TenantId = tc.TenantId
+                                        AccountId = req.fundingAccountId
+                                        OccurredAt = now
+                                        PostedAt = None
+                                        Amount = { Amount = -absAmount; CurrencyCode = currency }
+                                        Description = "Credit card payment"
+                                        Merchant = None
+                                        Memo = None
+                                        CategoryId = None
+                                        Status = TransactionStatus.Cleared
+                                        Source = TransactionSource.Manual
+                                        ExternalId = None
+                                        MatchedTransactionId = None
+                                        TransferAccountId = Some req.creditCardAccountId
+                                        MatchConfidence = None
+                                        SyncEventId = None
+                                        CreatedAt = now
+                                        UpdatedAt = now
+                                    }
+
+                                    let creditTxn: Transaction = {
+                                        Id = creditId
+                                        TenantId = tc.TenantId
+                                        AccountId = req.creditCardAccountId
+                                        OccurredAt = now
+                                        PostedAt = None
+                                        Amount = { Amount = absAmount; CurrencyCode = currency }
+                                        Description = "Credit card payment"
+                                        Merchant = None
+                                        Memo = None
+                                        CategoryId = None
+                                        Status = TransactionStatus.Cleared
+                                        Source = TransactionSource.Manual
+                                        ExternalId = None
+                                        MatchedTransactionId = None
+                                        TransferAccountId = Some req.fundingAccountId
+                                        MatchConfidence = None
+                                        SyncEventId = None
+                                        CreatedAt = now
+                                        UpdatedAt = now
+                                    }
+
+                                    let! _ = AtomicSql.insertTransaction conn tx debitTxn
+                                    let! _ = AtomicSql.insertTransaction conn tx creditTxn
+                                    debitTxnId <- Some debitId
+                                    creditTxnId <- Some creditId
+
+                                let payment: CreditCardPayment = {
+                                    Id = paymentId
                                     TenantId = tc.TenantId
-                                    AccountId = req.fundingAccountId
-                                    OccurredAt = now
-                                    PostedAt = None
-                                    Amount = { Amount = -absAmount; CurrencyCode = currency }
-                                    Description = "Credit card payment"
-                                    Merchant = None
-                                    Memo = None
-                                    CategoryId = None
-                                    Status = TransactionStatus.Cleared
-                                    Source = TransactionSource.Manual
-                                    ExternalId = None
-                                    MatchedTransactionId = None
-                                    TransferAccountId = Some req.creditCardAccountId
-                                    MatchConfidence = None
-                                    SyncEventId = None
+                                    CreditCardAccountId = req.creditCardAccountId
+                                    FundingAccountId = req.fundingAccountId
+                                    Amount = paymentMoney
+                                    PaymentType = paymentType
+                                    ScheduledDate = Some scheduledDate
+                                    PaidAt = if isImmediate then Some now else None
+                                    DebitTransactionId = debitTxnId
+                                    CreditTransactionId = creditTxnId
                                     CreatedAt = now
-                                    UpdatedAt = now
                                 }
 
-                                let creditTxn: Transaction = {
-                                    Id = creditId
-                                    TenantId = tc.TenantId
-                                    AccountId = req.creditCardAccountId
-                                    OccurredAt = now
-                                    PostedAt = None
-                                    Amount = { Amount = absAmount; CurrencyCode = currency }
-                                    Description = "Credit card payment"
-                                    Merchant = None
-                                    Memo = None
-                                    CategoryId = None
-                                    Status = TransactionStatus.Cleared
-                                    Source = TransactionSource.Manual
-                                    ExternalId = None
-                                    MatchedTransactionId = None
-                                    TransferAccountId = Some req.fundingAccountId
-                                    MatchConfidence = None
-                                    SyncEventId = None
-                                    CreatedAt = now
-                                    UpdatedAt = now
-                                }
+                                let! _ = AtomicSql.insertCreditCardPayment conn tx payment
+                                do! tx.CommitAsync()
 
-                                let! _ = txnRepo.CreateAsync(debitTxn)
-                                let! _ = txnRepo.CreateAsync(creditTxn)
-                                debitTxnId <- Some debitId
-                                creditTxnId <- Some creditId
-
-                            let payment: CreditCardPayment = {
-                                Id = paymentId
-                                TenantId = tc.TenantId
-                                CreditCardAccountId = req.creditCardAccountId
-                                FundingAccountId = req.fundingAccountId
-                                Amount = paymentMoney
-                                PaymentType = paymentType
-                                ScheduledDate = Some scheduledDate
-                                PaidAt = if isImmediate then Some now else None
-                                DebitTransactionId = debitTxnId
-                                CreditTransactionId = creditTxnId
-                                CreatedAt = now
-                            }
-
-                            let! _ = paymentRepo.CreateAsync(payment)
-                            ctx.Response.StatusCode <- 201
-                            do! Response.ofJson (ccPaymentToResponse payment) ctx
+                                ctx.Response.StatusCode <- 201
+                                do! Response.ofJson (ccPaymentToResponse payment) ctx
+                            with ex ->
+                                do! tx.RollbackAsync()
+                                ctx.Response.StatusCode <- 500
+                                do! Response.ofJson {| error = "Credit card payment creation failed" |} ctx
         }
 
     // GET /api/credit-card-payments?creditCardAccountId={id}
