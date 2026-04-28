@@ -34,6 +34,7 @@
     <Compile Include="RemediationAttemptRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
+    <Compile Include="ExportEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
     <Compile Include="CategoryEndpoints.fs" />
     <Compile Include="ReconciliationEndpoints.fs" />
