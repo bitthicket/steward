@@ -181,3 +181,56 @@ export async function listConnections() {
 	return api<{ connections: DataFeedConnection[] }>('/api/connections');
 }
 
+// ── Onboarding ─────────────────────────────────────────────────────────────
+
+export interface OnboardingState {
+	tenantId: string;
+	currentStep: number;
+	startedAt: string;
+	completedAt: string | null;
+	completedSteps: number[];
+	skipped: boolean;
+}
+
+export async function getOnboarding() {
+	return api<OnboardingState>('/api/onboarding');
+}
+
+export async function patchOnboarding(data: {
+	currentStep: number;
+	completedSteps: number[];
+	skipped: boolean;
+}) {
+	return api<{ status: string }>('/api/onboarding', {
+		method: 'PATCH',
+		body: JSON.stringify(data)
+	});
+}
+
+// ── Budgets ────────────────────────────────────────────────────────────────
+
+export interface Budget {
+	id: string;
+	name: string;
+	period: string;
+	currency: string;
+	style: string;
+	income: { amount: number; currencyCode: string } | null;
+	startsOn: string;
+	isActive: boolean;
+}
+
+export async function createBudget(data: {
+	name: string;
+	period: string;
+	currency: string;
+	style: string;
+	income?: number;
+	startsOn?: string;
+}) {
+	return api<Budget>('/api/budgets', {
+		method: 'POST',
+		body: JSON.stringify(data)
+	});
+}
+
