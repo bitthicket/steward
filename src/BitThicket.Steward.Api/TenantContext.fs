@@ -20,6 +20,8 @@ type ITenantContextAccessor =
 /// Reads TenantContext from the current HttpContext.Items (populated by
 /// TenantContextMiddleware via validated JWT claims).
 type TenantContextAccessor(httpContextAccessor: IHttpContextAccessor) =
+    [<DefaultValue>] val mutable Context : TenantContext option
+
     interface ITenantContextAccessor with
         member _.Context =
             match httpContextAccessor.HttpContext with
