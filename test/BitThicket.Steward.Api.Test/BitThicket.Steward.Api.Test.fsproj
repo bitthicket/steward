@@ -44,6 +44,8 @@
     <Compile Include="EventBusTests.fs" />
     <Compile Include="SyncCoordinatorTests.fs" />
     <Compile Include="ConnectionSyncTests.fs" />
+    <Compile Include="HealthTests.fs" />
+    <Compile Include="MetricsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

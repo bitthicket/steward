@@ -50,6 +50,9 @@
     <Compile Include="FeedHealthWorker.fs" />
     <Compile Include="AkoyaTokenRefreshWorker.fs" />
     <Compile Include="SyncCoordinator.fs" />
+    <Compile Include="Metrics.fs" />
+    <Compile Include="Health.fs" />
+    <Compile Include="Middleware.fs" />
     <Compile Include="Logging.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

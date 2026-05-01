@@ -20,12 +20,14 @@ open BitThicket.Steward.Api.Domain
 open BitThicket.Steward.Api.Vault
 open BitThicket.Steward.Pricing
 open Serilog
+open Serilog.Formatting.Compact
 
 // ── Serilog setup with secret redaction ──────────────────────────────────────
 let loggerConfig =
     LoggerConfiguration()
         .Destructure.With<SecretMaskingPolicy>()
-        .WriteTo.Console()
+        .Enrich.FromLogContext()
+        .WriteTo.Console(CompactJsonFormatter())
         .CreateLogger()
 
 // Run DbUp before the web host starts. A failure here throws and the process
@@ -87,6 +89,7 @@ let version =
 let builder = WebApplication.CreateBuilder()
 builder.Logging.ClearProviders() |> ignore
 builder.Logging.AddSerilog(loggerConfig) |> ignore
+builder.Services.AddSingleton<MetricsState>(Metrics.state) |> ignore
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
 
 // ── JSON options ─────────────────────────────────────────────────────────────
@@ -583,6 +586,7 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
                 created <- created + 1
 
         do! Response.ofJson {| created = created; updated = updated; matched = matched |} ctx
+        Metrics.state.IncSyncEvent("internal", "upsert")
     }
 
 // POST /internal/transactions/remove
@@ -706,8 +710,10 @@ let triggerSyncForConnectionAsync (http: HttpClient) (factory: IDbConnectionFact
                     let! resp = http.SendAsync(req)
                     let! body = resp.Content.ReadAsStringAsync()
                     if not resp.IsSuccessStatusCode then
+                        Metrics.state.IncSyncEvent("plaid", "failure")
                         return Error $"Plaid ingestion failed: {body}"
                     else
+                        Metrics.state.IncSyncEvent("plaid", "success")
                         return Ok {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |}
                 | _ ->
                     return Error "Plaid ingestion URL or service token not configured"
@@ -723,8 +729,10 @@ let triggerSyncForConnectionAsync (http: HttpClient) (factory: IDbConnectionFact
                     let! resp = http.SendAsync(req)
                     let! body = resp.Content.ReadAsStringAsync()
                     if not resp.IsSuccessStatusCode then
+                        Metrics.state.IncSyncEvent("akoya", "failure")
                         return Error $"Akoya ingestion failed: {body}"
                     else
+                        Metrics.state.IncSyncEvent("akoya", "success")
                         return Ok {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |}
                 | _ ->
                     return Error "Akoya ingestion URL or service token not configured"
@@ -809,6 +817,50 @@ let plaidWebhookHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson {| status = "ignored"; webhookType = webhookType; webhookCode = webhookCode |} ctx
     }
 
+// GET /health/ready
+let readyHandler : HttpHandler = fun ctx ->
+    task {
+        let logger = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Health")
+        let checker = HealthChecker(connectionString, logger)
+        let! statusCode, status, checks = checker.CheckAllAsync()
+        ctx.Response.StatusCode <- statusCode
+        let checkResponses =
+            checks
+            |> List.map (fun (name, result) ->
+                match result with
+                | Healthy msg -> {| name = name; status = "healthy"; message = msg |}
+                | Unhealthy msg -> {| name = name; status = "unhealthy"; message = msg |})
+        do! Response.ofJson {| status = status; checks = checkResponses |} ctx
+    }
+
+// GET /metrics
+let metricsHandler : HttpHandler = fun ctx ->
+    task {
+        match serviceToken with
+        | None ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = "Metrics not configured" |} ctx
+        | Some token ->
+            let header =
+                match ctx.Request.Headers.TryGetValue("Authorization") with
+                | true, v when v.Count > 0 -> v.ToString()
+                | _ -> ""
+
+            let provided =
+                if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
+                    header.Substring(7)
+                else
+                    ""
+
+            if provided <> token then
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            else
+                let output = Metrics.state.Format()
+                ctx.Response.ContentType <- "text/plain; version=0.0.4; charset=utf-8"
+                do! Response.ofPlainText output ctx
+    }
+
 // ── Static files (portal SPA) ────────────────────────────────────────────────
 
 let portalPath = Path.Combine(wapp.Environment.WebRootPath, "portal")
@@ -823,11 +875,15 @@ if Directory.Exists(portalPath) then
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
+wapp.UseMiddleware<RequestLogEnrichmentMiddleware>() |> ignore
+wapp.UseMiddleware<MetricsMiddleware>() |> ignore
 
 wapp.UseRouting()
     .UseFalco([
         get "/" (Response.ofPlainText "Hello World!")
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
+        get "/health/ready" readyHandler
+        get "/metrics" metricsHandler
         post "/auth/register" Auth.registerHandler
         post "/auth/login" Auth.loginHandler
         post "/api/auth/cookie-set" Auth.cookieSetHandler

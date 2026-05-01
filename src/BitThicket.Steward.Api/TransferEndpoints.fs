@@ -278,8 +278,8 @@ module TransferEndpoints =
                             TransferAccountId = Some req.toAccountId
                             MatchConfidence = None
                             SyncEventId = None
-                            CreatedAt = now
                             DeletedAt = None
+                            CreatedAt = now
                             UpdatedAt = now
                         }
 
@@ -301,8 +301,8 @@ module TransferEndpoints =
                             TransferAccountId = Some req.fromAccountId
                             MatchConfidence = None
                             SyncEventId = None
-                            CreatedAt = now
                             DeletedAt = None
+                            CreatedAt = now
                             UpdatedAt = now
                         }
 
@@ -405,8 +405,8 @@ module TransferEndpoints =
                                         TransferAccountId = Some req.creditCardAccountId
                                         MatchConfidence = None
                                         SyncEventId = None
-                                        CreatedAt = now
                                         DeletedAt = None
+                                        CreatedAt = now
                                         UpdatedAt = now
                                     }
 
@@ -428,8 +428,8 @@ module TransferEndpoints =
                                         TransferAccountId = Some req.fundingAccountId
                                         MatchConfidence = None
                                         SyncEventId = None
-                                        CreatedAt = now
                                         DeletedAt = None
+                                        CreatedAt = now
                                         UpdatedAt = now
                                     }
 
