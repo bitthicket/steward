@@ -280,7 +280,6 @@ module TransferEndpoints =
                             SyncEventId = None
                             DeletedAt = None
                             CreatedAt = now
-                            DeletedAt = None
                             UpdatedAt = now
                         }
 
@@ -304,7 +303,6 @@ module TransferEndpoints =
                             SyncEventId = None
                             DeletedAt = None
                             CreatedAt = now
-                            DeletedAt = None
                             UpdatedAt = now
                         }
 
@@ -409,7 +407,6 @@ module TransferEndpoints =
                                         SyncEventId = None
                                         DeletedAt = None
                                         CreatedAt = now
-                                        DeletedAt = None
                                         UpdatedAt = now
                                     }
 
@@ -433,7 +430,6 @@ module TransferEndpoints =
                                         SyncEventId = None
                                         DeletedAt = None
                                         CreatedAt = now
-                                        DeletedAt = None
                                         UpdatedAt = now
                                     }
 
