@@ -53,6 +53,7 @@ type AttachmentResponse = {
     kind: string
     contentType: string
     sizeBytes: int64
+    storageRef: string
     uploadedAt: DateTimeOffset
 }
 
@@ -71,6 +72,7 @@ module private AttachmentHelpers =
                 | AttachmentKind.Other label -> $"other:{label}"
             contentType = a.ContentType
             sizeBytes = a.SizeBytes
+            storageRef = a.StorageRef
             uploadedAt = a.UploadedAt
         }
 
@@ -274,6 +276,11 @@ module AttachmentEndpoints =
         }
 
     // DELETE /api/attachments/{id}
+    ///
+    /// Deletes the attachment row first, then checks whether any other row in
+    /// the tenant still references the same content-addressed storage_ref.
+    /// Only deletes the on-disk file when the ref count drops to zero.
+    /// This fixes the shared-content deletion bug described in STE-113.
     let deleteAttachmentHandler (id: Guid) : HttpHandler = fun ctx ->
         task {
             let attachmentRepo = ctx.RequestServices.GetRequiredService<IAttachmentRepository>()
@@ -291,8 +298,13 @@ module AttachmentEndpoints =
                     ctx.Response.StatusCode <- 404
                     do! Response.ofJson {| error = "Attachment not found" |} ctx
                 | Some attachment ->
-                    do! storage.DeleteAsync tc.TenantId attachment.StorageRef
+                    // 1. Delete the attachment row first.
                     do! attachmentRepo.DeleteAsync(id)
+                    // 2. Check whether any other row still references the same file.
+                    let! remaining = attachmentRepo.CountByStorageRefAsync(attachment.StorageRef)
+                    // 3. Only delete the on-disk blob when no refs remain.
+                    if remaining = 0 then
+                        do! storage.DeleteAsync tc.TenantId attachment.StorageRef
                     ctx.Response.StatusCode <- 204
                     do! Response.ofEmpty ctx
         }

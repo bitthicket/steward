@@ -152,3 +152,45 @@ type AttachmentRepositoryTests() =
             let! fetchedOpt = repoB.GetAsync(attachmentId)
             test <@ fetchedOpt.IsNone @>
         }
+
+    [<Fact>]
+    member _.``CountByStorageRefAsync reflects only current tenant``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+            let tenantId = Guid.NewGuid()
+            let userId = Guid.NewGuid()
+            let accountId = Guid.NewGuid()
+            let txnId = Guid.NewGuid()
+            let attachA = Guid.NewGuid()
+            let attachB = Guid.NewGuid()
+            let sharedRef = "shared-ref-abc123"
+
+            use seedConn = dataSource.OpenConnection()
+            seedAccount seedConn tenantId userId accountId "Checking" "USD"
+            seedTransaction seedConn tenantId accountId txnId -10000L DateTimeOffset.UtcNow "manual" "cleared" DateTimeOffset.UtcNow
+            seedAttachment seedConn tenantId txnId attachA sharedRef
+            seedAttachment seedConn tenantId txnId attachB sharedRef
+
+            let accessor =
+                { new ITenantContextAccessor with
+                    member _.Context = Some { TenantId = tenantId; UserId = userId } }
+            let repo = AttachmentRepository.create factory accessor
+
+            let! count = repo.CountByStorageRefAsync(sharedRef)
+            test <@ count = 2 @>
+
+            // Delete one ref.
+            do! repo.DeleteAsync(attachA)
+            let! countAfter = repo.CountByStorageRefAsync(sharedRef)
+            test <@ countAfter = 1 @>
+
+            // Delete the remaining ref.
+            do! repo.DeleteAsync(attachB)
+            let! countFinal = repo.CountByStorageRefAsync(sharedRef)
+            test <@ countFinal = 0 @>
+        }

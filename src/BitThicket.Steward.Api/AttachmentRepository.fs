@@ -13,6 +13,9 @@ type IAttachmentRepository =
     abstract ListBySplitAsync : splitId:Guid -> Task<Attachment list>
     abstract CreateAsync : attachment:Attachment -> Task<Guid>
     abstract DeleteAsync : id:Guid -> Task<unit>
+    /// Count how many attachment rows in the current tenant still reference the given storage_ref.
+    /// Used by the delete handler to avoid removing shared content-addressed blobs. (STE-113)
+    abstract CountByStorageRefAsync : storageRef:string -> Task<int>
 
 module AttachmentRepository =
 
@@ -138,6 +141,17 @@ module AttachmentRepository =
             return ()
         }
 
+    let countByStorageRefAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (storageRef: string) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <- "SELECT COUNT(*) FROM attachments WHERE storage_ref = $1 AND tenant_id = $2"
+            cmd.Parameters.AddWithValue("$1", storageRef) |> ignore
+            cmd.Parameters.AddWithValue("$2", tenantContext.TenantId) |> ignore
+            let! result = cmd.ExecuteScalarAsync()
+            return Convert.ToInt32(result)
+        }
+
     let create (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) : IAttachmentRepository =
         let requireCtx () =
             match accessor.Context with
@@ -150,4 +164,5 @@ module AttachmentRepository =
             member _.ListBySplitAsync(splitId) = listBySplitAsync factory (requireCtx()) splitId
             member _.CreateAsync(attachment) = createAsync factory attachment
             member _.DeleteAsync(id) = deleteAsync factory (requireCtx()) id
+            member _.CountByStorageRefAsync(storageRef) = countByStorageRefAsync factory (requireCtx()) storageRef
         }

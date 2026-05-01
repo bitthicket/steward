@@ -930,12 +930,10 @@ wapp.UseRouting()
         post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
             let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
             ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
-=======
         // Transfers and credit card payments
         post "/api/transfers" (AuthHelpers.requireAuth TransferEndpoints.createTransferHandler)
         post "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.createCreditCardPaymentHandler)
         get "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.listCreditCardPaymentsHandler)
->>>>>>> 47f0a62 (STE-25: credit card payments + transfers)
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
