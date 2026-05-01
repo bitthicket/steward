@@ -210,7 +210,7 @@ type ReconciliationEndpointsTests() =
             seedAccount seedConn tenantId userId accountId
 
             let txn1 = Guid.NewGuid()
-            seedTransaction seedConn tenantId userId accountId txn1 100L (DateTimeOffset(2026, 4, 10, 0, 0, 0, TimeSpan.Zero)) "cleared"
+            seedTransaction seedConn tenantId accountId txn1 100L (DateTimeOffset(2026, 4, 10, 0, 0, 0, TimeSpan.Zero)) "cleared"
 
             let createCtx = createHttpContextWithAuth factory token
             setJsonBody createCtx $"{{\"accountId\":\"{accountId}\",\"statementDate\":\"2026-04-15\",\"statementBalanceMinor\":100,\"currency\":\"USD\"}}"

@@ -221,3 +221,65 @@ type AttachmentEndpointsTests() =
             do! AttachmentEndpoints.getAttachmentHandler attachmentId getCtx
             test <@ getCtx.Response.StatusCode = 404 @>
         }
+
+    /// STE-113: deleting one attachment must not remove the on-disk blob when
+    /// another attachment row references the same content-addressed storage_ref.
+    [<Fact>]
+    member _.``DELETE /api/attachments/{id} does not remove shared file when another attachment references same storage_ref``() =
+        task {
+            if not (canConnect ()) then return () else
+
+            let cs = connectionString ()
+            runMigrations cs
+            use dataSource = NpgsqlDataSource.Create(cs)
+            let factory = DbConnectionFactory(dataSource) :> IDbConnectionFactory
+
+            let! token = registerAndGetToken factory "attshare@example.com"
+            let jwtDoc =
+                let ctx = createHttpContextWithAuth factory token
+                setJsonBody ctx """{"email":"x","password":"x","displayName":"x","tenantDisplayName":"x"}"""
+                Auth.registerHandler ctx |> Async.AwaitTask |> Async.RunSynchronously
+                readResponseJson ctx
+            let tenantId = Guid.Parse(jwtDoc.RootElement.GetProperty("tenantId").GetString())
+            let userId = Guid.Parse(jwtDoc.RootElement.GetProperty("userId").GetString())
+
+            use seedConn = dataSource.OpenConnection()
+            let accountId = Guid.NewGuid()
+            let txnA = Guid.NewGuid()
+            let txnB = Guid.NewGuid()
+            seedAccount seedConn tenantId userId accountId "Checking" "USD"
+            seedTransaction seedConn tenantId accountId txnA -10000L DateTimeOffset.UtcNow "manual" "cleared" DateTimeOffset.UtcNow
+            seedTransaction seedConn tenantId accountId txnB -20000L DateTimeOffset.UtcNow "manual" "cleared" DateTimeOffset.UtcNow
+
+            // Upload the SAME file to two different transactions → shared storage_ref.
+            let sharedFileBytes = Encoding.UTF8.GetBytes("shared receipt content")
+
+            let uploadCtxA = createHttpContextWithAuth factory token
+            setMultipartBody uploadCtxA sharedFileBytes "receipt.pdf" "application/pdf" "receipt"
+            do! AttachmentEndpoints.createTransactionAttachmentHandler txnA uploadCtxA
+            test <@ uploadCtxA.Response.StatusCode = 201 @>
+            let docA = readResponseJson uploadCtxA
+            let attachA = Guid.Parse(docA.RootElement.GetProperty("id").GetString())
+
+            let uploadCtxB = createHttpContextWithAuth factory token
+            setMultipartBody uploadCtxB sharedFileBytes "receipt.pdf" "application/pdf" "receipt"
+            do! AttachmentEndpoints.createTransactionAttachmentHandler txnB uploadCtxB
+            test <@ uploadCtxB.Response.StatusCode = 201 @>
+            let docB = readResponseJson uploadCtxB
+            let attachB = Guid.Parse(docB.RootElement.GetProperty("id").GetString())
+
+            // They must reference the same storage_ref (content addressing).
+            test <@ docA.RootElement.GetProperty("storageRef").GetString() = docB.RootElement.GetProperty("storageRef").GetString() @>
+
+            // Delete attachment A.
+            let delCtx = createHttpContextWithAuth factory token
+            do! AttachmentEndpoints.deleteAttachmentHandler attachA delCtx
+            test <@ delCtx.Response.StatusCode = 204 @>
+
+            // Attachment B must still be downloadable (shared file survived).
+            let getCtx = createHttpContextWithAuth factory token
+            do! AttachmentEndpoints.getAttachmentHandler attachB getCtx
+            test <@ getCtx.Response.StatusCode = 200 @>
+            let responseBytes = (getCtx.Response.Body :?> MemoryStream).ToArray()
+            test <@ Encoding.UTF8.GetString(responseBytes) = "shared receipt content" @>
+        }

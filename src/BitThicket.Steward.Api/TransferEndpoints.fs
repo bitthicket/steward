@@ -279,6 +279,7 @@ module TransferEndpoints =
                             MatchConfidence = None
                             SyncEventId = None
                             CreatedAt = now
+                            DeletedAt = None
                             UpdatedAt = now
                         }
 
@@ -301,6 +302,7 @@ module TransferEndpoints =
                             MatchConfidence = None
                             SyncEventId = None
                             CreatedAt = now
+                            DeletedAt = None
                             UpdatedAt = now
                         }
 
@@ -404,6 +406,7 @@ module TransferEndpoints =
                                         MatchConfidence = None
                                         SyncEventId = None
                                         CreatedAt = now
+                                        DeletedAt = None
                                         UpdatedAt = now
                                     }
 
@@ -426,6 +429,7 @@ module TransferEndpoints =
                                         MatchConfidence = None
                                         SyncEventId = None
                                         CreatedAt = now
+                                        DeletedAt = None
                                         UpdatedAt = now
                                     }
 
