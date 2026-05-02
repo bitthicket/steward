@@ -205,9 +205,27 @@ type PlaidSyncResult = {
     NextCursor: string option
 }
 
+type PlaidAccountInfo = {
+    Id: string
+    Name: string
+    Type: string
+    Subtype: string option
+    Mask: string option
+}
+
+type PlaidExchangeResult = {
+    ConnectionId: Guid
+    ItemId: string
+    AccessToken: string
+}
+
 type IPlaidService =
     abstract SyncConnectionAsync : tenantId:Guid -> connectionId:Guid -> Task<PlaidSyncResult>
     abstract VerifyWebhookAsync : bodyBytes:byte[] -> verificationHeader:string -> Task<bool>
+    abstract CreateLinkTokenAsync : tenantId:Guid -> userId:Guid -> Task<string>
+    abstract CreateReauthTokenAsync : tenantId:Guid -> connectionId:Guid -> Task<string>
+    abstract ExchangePublicTokenAsync : publicToken:string -> Task<PlaidExchangeResult>
+    abstract RemoveItemAsync : accessToken:string -> Task<bool>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plaid service implementation
@@ -289,6 +307,7 @@ type PlaidService(
                               Status = TransactionStatus.Cleared
                               MatchConfidence = None
                               SyncEventId = syncEventId
+                              DeletedAt = None
                               CreatedAt = now
                               UpdatedAt = now }
 
@@ -377,3 +396,87 @@ type PlaidService(
 
         member _.VerifyWebhookAsync bodyBytes verificationHeader =
             PlaidWebhookVerifier.verify http config bodyBytes verificationHeader
+
+        member _.CreateLinkTokenAsync tenantId userId =
+            task {
+                let clientUserId = $"{tenantId}-{userId}"
+                let req = System.Text.Json.Nodes.JsonObject()
+                req["client_id"] <- System.Text.Json.Nodes.JsonValue.Create(config.ClientId)
+                req["secret"] <- System.Text.Json.Nodes.JsonValue.Create(config.Secret)
+                req["client_name"] <- System.Text.Json.Nodes.JsonValue.Create("Steward")
+                req["country_codes"] <-
+                    let arr = System.Text.Json.Nodes.JsonArray()
+                    arr.Add(System.Text.Json.Nodes.JsonValue.Create("US"))
+                    arr
+                req["language"] <- System.Text.Json.Nodes.JsonValue.Create("en")
+                req["user"] <-
+                    let userObj = System.Text.Json.Nodes.JsonObject()
+                    userObj["client_user_id"] <- System.Text.Json.Nodes.JsonValue.Create(clientUserId)
+                    userObj
+                req["products"] <-
+                    let arr = System.Text.Json.Nodes.JsonArray()
+                    arr.Add(System.Text.Json.Nodes.JsonValue.Create("transactions"))
+                    arr
+
+                let! doc = PlaidHttp.postJson http $"{config.BaseUrl}/link/token/create" (req.ToJsonString())
+                return doc.RootElement.GetProperty("link_token").GetString()
+            }
+
+        member _.CreateReauthTokenAsync tenantId connectionId =
+            task {
+                let accessor = makeAccessor tenantId
+                let connRepo = DataFeedConnectionRepository.create factory accessor
+                let! connOpt = connRepo.GetAsync(connectionId)
+                match connOpt with
+                | None -> return failwith $"Connection not found: {connectionId}"
+                | Some conn ->
+                    let! envelope = vault.LoadAsync({ TenantId = tenantId; UserId = conn.UserId }, conn.CredentialRef)
+                    let accessToken = envelope.AccessToken
+                    let clientUserId = $"{tenantId}-{conn.UserId}"
+
+                    let req = System.Text.Json.Nodes.JsonObject()
+                    req["client_id"] <- System.Text.Json.Nodes.JsonValue.Create(config.ClientId)
+                    req["secret"] <- System.Text.Json.Nodes.JsonValue.Create(config.Secret)
+                    req["client_name"] <- System.Text.Json.Nodes.JsonValue.Create("Steward")
+                    req["country_codes"] <-
+                        let arr = System.Text.Json.Nodes.JsonArray()
+                        arr.Add(System.Text.Json.Nodes.JsonValue.Create("US"))
+                        arr
+                    req["language"] <- System.Text.Json.Nodes.JsonValue.Create("en")
+                    req["user"] <-
+                        let userObj = System.Text.Json.Nodes.JsonObject()
+                        userObj["client_user_id"] <- System.Text.Json.Nodes.JsonValue.Create(clientUserId)
+                        userObj
+                    req["access_token"] <- System.Text.Json.Nodes.JsonValue.Create(accessToken)
+
+                    let! doc = PlaidHttp.postJson http $"{config.BaseUrl}/link/token/create" (req.ToJsonString())
+                    return doc.RootElement.GetProperty("link_token").GetString()
+            }
+
+        member _.ExchangePublicTokenAsync publicToken =
+            task {
+                let req = System.Text.Json.Nodes.JsonObject()
+                req["client_id"] <- System.Text.Json.Nodes.JsonValue.Create(config.ClientId)
+                req["secret"] <- System.Text.Json.Nodes.JsonValue.Create(config.Secret)
+                req["public_token"] <- System.Text.Json.Nodes.JsonValue.Create(publicToken)
+
+                let! doc = PlaidHttp.postJson http $"{config.BaseUrl}/item/public_token/exchange" (req.ToJsonString())
+                let accessToken = doc.RootElement.GetProperty("access_token").GetString()
+                let itemId = doc.RootElement.GetProperty("item_id").GetString()
+                return { ConnectionId = Guid.NewGuid(); ItemId = itemId; AccessToken = accessToken }
+            }
+
+        member _.RemoveItemAsync accessToken =
+            task {
+                let req = System.Text.Json.Nodes.JsonObject()
+                req["client_id"] <- System.Text.Json.Nodes.JsonValue.Create(config.ClientId)
+                req["secret"] <- System.Text.Json.Nodes.JsonValue.Create(config.Secret)
+                req["access_token"] <- System.Text.Json.Nodes.JsonValue.Create(accessToken)
+
+                let! doc = PlaidHttp.postJson http $"{config.BaseUrl}/item/remove" (req.ToJsonString())
+                let removed =
+                    match doc.RootElement.TryGetProperty("removed") with
+                    | true, (el: JsonElement) -> el.GetBoolean()
+                    | _ -> false
+                return removed
+            }

@@ -10,13 +10,24 @@ open Falco
 open Falco.Routing
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
+open Microsoft.AspNetCore.Http
+open Microsoft.AspNetCore.Http.Features
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.FileProviders
 open Microsoft.Extensions.Logging
 open Npgsql
 open BitThicket.Steward.Api
 open BitThicket.Steward.Api.Domain
 open BitThicket.Steward.Api.Vault
 open BitThicket.Steward.Pricing
+open Serilog
+
+// ── Serilog setup with secret redaction ──────────────────────────────────────
+let loggerConfig =
+    LoggerConfiguration()
+        .Destructure.With<SecretMaskingPolicy>()
+        .WriteTo.Console()
+        .CreateLogger()
 
 // Run DbUp before the web host starts. A failure here throws and the process
 // exits non-zero so Northflank surfaces a failed deploy rather than booting an
@@ -60,6 +71,11 @@ let akoyaIngestionUrl =
     | null | "" -> None
     | v -> Some v
 
+let plaidIngestionUrl =
+    match Environment.GetEnvironmentVariable("STEWARD_PLAID_INGESTION_URL") with
+    | null | "" -> None
+    | v -> Some v
+
 let serviceToken =
     match Environment.GetEnvironmentVariable("STEWARD_SERVICE_TOKEN") with
     | null | "" -> None
@@ -70,12 +86,26 @@ let version =
     if isNull v then "0.0.0" else v.ToString()
 
 let builder = WebApplication.CreateBuilder()
+builder.Logging.ClearProviders() |> ignore
+builder.Logging.AddSerilog(loggerConfig) |> ignore
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}") |> ignore
+
+// ── JSON options ─────────────────────────────────────────────────────────────
+builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(fun (opts: Microsoft.AspNetCore.Http.Json.JsonOptions) ->
+    opts.SerializerOptions.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+    opts.SerializerOptions.Converters.Add(MoneyConverter())) |> ignore
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(fun (opts: Microsoft.AspNetCore.Mvc.JsonOptions) ->
+    opts.JsonSerializerOptions.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+    opts.JsonSerializerOptions.Converters.Add(MoneyConverter())) |> ignore
 
 // ── Services ──────────────────────────────────────────────────────────────────
 
 let dataSource = NpgsqlDataSource.Create(connectionString)
 builder.Services.AddSingleton<NpgsqlDataSource>(dataSource) |> ignore
+builder.Services.Configure<FormOptions>(fun (opts: FormOptions) ->
+    opts.MultipartBodyLengthLimit <- int64 (10 * 1024 * 1024)
+    opts.ValueLengthLimit <- 10 * 1024 * 1024
+) |> ignore
 TenantContextServices.register builder.Services |> ignore
 AuthServices.register builder.Services { JwtSecret = jwtSecret; JwtSecretPrevious = jwtSecretPrevious; Issuer = jwtIssuer; Audience = jwtAudience } |> ignore
 builder.Services.AddSingleton<IDbConnectionFactory>(DbConnectionFactory(dataSource)) |> ignore
@@ -83,9 +113,26 @@ builder.Services.AddScoped<ITransactionRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     TransactionRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<ICreditCardPaymentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    CreditCardPaymentRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<ISplitRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    SplitRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IAttachmentRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    AttachmentRepository.create factory accessor) |> ignore
+builder.Services.AddSingleton<IAttachmentStorage>(LocalAttachmentStorage.create()) |> ignore
 builder.Services.AddScoped<ITransactionMatcher>(fun sp ->
     let repo = sp.GetRequiredService<ITransactionRepository>()
     TransactionMatcher.create repo) |> ignore
+builder.Services.AddScoped<IReconciliationRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    ReconciliationRepository.create factory accessor) |> ignore
 builder.Services.AddScoped<IBudgetRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
@@ -117,6 +164,26 @@ builder.Services.AddScoped<IDataFeedConnectionRepository>(fun sp ->
     let factory = sp.GetRequiredService<IDbConnectionFactory>()
     let accessor = sp.GetRequiredService<ITenantContextAccessor>()
     DataFeedConnectionRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<ISyncEventRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    SyncEventRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IFeedHealthRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    FeedHealthRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IRemediationAttemptRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    RemediationAttemptRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IUserPreferencesRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    UserPreferencesRepository.create factory accessor) |> ignore
+builder.Services.AddScoped<IOnboardingRepository>(fun sp ->
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let accessor = sp.GetRequiredService<ITenantContextAccessor>()
+    OnboardingRepository.create factory accessor) |> ignore
 builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let config = PlaidConfig.fromEnvironment()
     let http = sp.GetRequiredService<HttpClient>()
@@ -124,7 +191,20 @@ builder.Services.AddSingleton<IPlaidService>(fun sp ->
     let vault = sp.GetRequiredService<IVaultService>()
     let log = sp.GetRequiredService<ILogger<PlaidService>>()
     PlaidService(config, http, factory, vault, log) :> IPlaidService) |> ignore
+builder.Services.AddSingleton<IAkoyaOAuthService>(fun sp ->
+    let config = AkoyaOAuthConfig.fromEnvironment()
+    let http = sp.GetRequiredService<HttpClient>()
+    let factory = sp.GetRequiredService<IDbConnectionFactory>()
+    let vault = sp.GetRequiredService<IVaultService>()
+    let log = sp.GetRequiredService<ILogger<AkoyaOAuthService>>()
+    AkoyaOAuthService(config, http, factory, vault, log) :> IAkoyaOAuthService) |> ignore
+builder.Services.AddSingleton<IEventBus>(fun sp ->
+    let log = sp.GetRequiredService<ILogger<InProcessEventBus>>()
+    InProcessEventBus(log) :> IEventBus) |> ignore
+builder.Services.AddHostedService<SyncCoordinator>() |> ignore
 builder.Services.AddHostedService<PricingWorker>() |> ignore
+builder.Services.AddHostedService<FeedHealthWorker>() |> ignore
+builder.Services.AddHostedService<AkoyaTokenRefreshWorker>() |> ignore
 
 let wapp = builder.Build()
 
@@ -175,6 +255,29 @@ let requireInt64 (el: JsonElement) (name: string) =
 let makeManualAccessor (tenantId: Guid) : ITenantContextAccessor =
     { new ITenantContextAccessor with
         member _.Context = Some { TenantId = tenantId; UserId = Guid.Empty } }
+
+let requireServiceToken (serviceToken: string option) (next: HttpHandler) : HttpHandler = fun ctx ->
+    task {
+        match serviceToken with
+        | None ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = "Service token not configured" |} ctx
+        | Some expected ->
+            let header =
+                match ctx.Request.Headers.TryGetValue("Authorization") with
+                | true, v when v.Count > 0 -> v.ToString()
+                | _ -> ""
+            let token =
+                if header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) then
+                    header.Substring(7)
+                else
+                    ""
+            if token <> expected then
+                ctx.Response.StatusCode <- 401
+                do! Response.ofJson {| error = "Unauthorized" |} ctx
+            else
+                do! next ctx
+    }
 
 // ── Route handlers ─────────────────────────────────────────────────────────────
 
@@ -294,6 +397,69 @@ let resolveHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson {| error = "Invalid action; expected 'accept' or 'reject'" |} ctx
     }
 
+// GET /api/onboarding
+let getOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let tc = accessor.Context.Value
+        let! stateOpt = repo.GetAsync(tc.TenantId)
+        match stateOpt with
+        | None ->
+            ctx.Response.StatusCode <- 404
+            do! Response.ofJson {| error = "Onboarding state not found" |} ctx
+        | Some state ->
+            let respJson =
+                let n = System.Text.Json.Nodes.JsonObject()
+                n["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(state.TenantId.ToString())
+                n["currentStep"] <- System.Text.Json.Nodes.JsonValue.Create(state.CurrentStep)
+                n["startedAt"] <- System.Text.Json.Nodes.JsonValue.Create(state.StartedAt.ToString("O"))
+                match state.CompletedAt with
+                | Some dt -> n["completedAt"] <- System.Text.Json.Nodes.JsonValue.Create(dt.ToString("O"))
+                | None -> n["completedAt"] <- null
+                let arr = System.Text.Json.Nodes.JsonArray()
+                for i in state.CompletedSteps do arr.Add(System.Text.Json.Nodes.JsonValue.Create(i))
+                n["completedSteps"] <- arr
+                n["skipped"] <- System.Text.Json.Nodes.JsonValue.Create(state.Skipped)
+                n
+            do! Response.ofJson respJson ctx
+    }
+
+// PATCH /api/onboarding
+let patchOnboardingHandler : HttpHandler = fun ctx ->
+    task {
+        let repo = ctx.RequestServices.GetRequiredService<IOnboardingRepository>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let! doc = readJsonBody ctx
+        let root = doc.RootElement
+        let currentStep = root.GetProperty("currentStep").GetInt32()
+        let skipped =
+            match root.TryGetProperty("skipped") with
+            | true, el when el.ValueKind = JsonValueKind.True -> true
+            | _ -> false
+        let completedSteps =
+            match root.TryGetProperty("completedSteps") with
+            | true, el when el.ValueKind = JsonValueKind.Array ->
+                el.EnumerateArray() |> Seq.map (fun e -> e.GetInt32()) |> Seq.toList
+            | _ -> []
+        let tc = accessor.Context.Value
+        let! existingOpt = repo.GetAsync(tc.TenantId)
+        let startedAt =
+            match existingOpt with
+            | Some existing -> existing.StartedAt
+            | None -> DateTimeOffset.UtcNow
+        let state = {
+            TenantId = tc.TenantId
+            CurrentStep = currentStep
+            StartedAt = startedAt
+            CompletedAt = if currentStep >= 5 then Some DateTimeOffset.UtcNow else None
+            CompletedSteps = completedSteps
+            Skipped = skipped
+        }
+        do! repo.UpsertAsync(state)
+        do! Response.ofJson {| status = "updated" |} ctx
+    }
+
 // POST /internal/transactions/upsert
 let internalUpsertHandler : HttpHandler = fun ctx ->
     task {
@@ -380,6 +546,7 @@ let internalUpsertHandler : HttpHandler = fun ctx ->
                       Status = TransactionStatus.Cleared
                       MatchConfidence = None
                       SyncEventId = syncEventIdOpt
+                      DeletedAt = None
                       CreatedAt = now
                       UpdatedAt = now }
 
@@ -463,6 +630,109 @@ let internalConnectionStatusHandler : HttpHandler = fun ctx ->
             do! Response.ofJson {| status = "updated"; connectionId = connectionId |} ctx
     }
 
+// GET /internal/connections/{id}/credentials
+// Returns decrypted credentials for the ingestion service. Protected by service token.
+let internalConnectionCredentialsHandler : HttpHandler = fun ctx ->
+    task {
+        let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
+        let accessor = ctx.RequestServices.GetRequiredService<ITenantContextAccessor>()
+        let vault = ctx.RequestServices.GetRequiredService<IVaultService>()
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let connectionId =
+            match ctx.Request.RouteValues.TryGetValue("connectionId") with
+            | true, v -> v :?> Guid
+            | _ -> Guid.Empty
+
+        if connectionId = Guid.Empty then
+            ctx.Response.StatusCode <- 400
+            do! Response.ofJson {| error = "Invalid connectionId" |} ctx
+        else
+            let! connOpt = connRepo.GetAsync(connectionId)
+            match connOpt with
+            | None ->
+                ctx.Response.StatusCode <- 404
+                do! Response.ofJson {| error = "Connection not found" |} ctx
+            | Some conn ->
+                let tenantContext = { TenantId = conn.TenantId; UserId = conn.UserId }
+                let! envelope = vault.LoadAsync(tenantContext, conn.CredentialRef)
+                let provider =
+                    match DataFeedConnection.providerOf conn.Metadata with
+                    | DataFeedProvider.Plaid -> "plaid"
+                    | DataFeedProvider.Akoya -> "akoya"
+                    | DataFeedProvider.MX -> "mx"
+                    | DataFeedProvider.Yodlee -> "yodlee"
+                    | DataFeedProvider.Intuit -> "intuit"
+                    | DataFeedProvider.Manual -> "manual"
+
+                let metadataJson =
+                    let opts = JsonSerializerOptions()
+                    opts.Converters.Add(System.Text.Json.Serialization.JsonFSharpConverter(System.Text.Json.Serialization.JsonUnionEncoding.NamedFields))
+                    opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+                    JsonSerializer.Serialize(conn.Metadata, opts)
+
+                let envelopeJson =
+                    let opts = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
+                    JsonSerializer.Serialize(envelope, opts)
+
+                let credsResponse = {|
+                    provider = provider
+                    providerMetadata = metadataJson
+                    vaultEnvelope = envelopeJson
+                |}
+                do! Response.ofJson credsResponse ctx
+    }
+
+// Shared sync trigger logic used by both the internal endpoint and the public API.
+let triggerSyncForConnectionAsync (http: HttpClient) (factory: IDbConnectionFactory) (accessor: ITenantContextAccessor) (connectionId: Guid) =
+    task {
+        let ctx =
+            match accessor.Context with
+            | Some c -> c
+            | None -> { TenantId = Guid.Empty; UserId = Guid.Empty }
+        let connRepo = DataFeedConnectionRepository.create factory accessor
+        let! connOpt = connRepo.GetAsync(connectionId)
+        match connOpt with
+        | None -> return Error "Connection not found"
+        | Some conn ->
+            match DataFeedConnection.providerOf conn.Metadata with
+            | DataFeedProvider.Plaid ->
+                match plaidIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(ctx.TenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        return Error $"Plaid ingestion failed: {body}"
+                    else
+                        return Ok {| status = "sync_triggered"; provider = "plaid"; connectionId = connectionId |}
+                | _ ->
+                    return Error "Plaid ingestion URL or service token not configured"
+            | DataFeedProvider.Akoya ->
+                match akoyaIngestionUrl, serviceToken with
+                | Some url, Some token ->
+                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
+                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+                    let payload = System.Text.Json.Nodes.JsonObject()
+                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(ctx.TenantId.ToString())
+                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
+                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+                    let! resp = http.SendAsync(req)
+                    let! body = resp.Content.ReadAsStringAsync()
+                    if not resp.IsSuccessStatusCode then
+                        return Error $"Akoya ingestion failed: {body}"
+                    else
+                        return Ok {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |}
+                | _ ->
+                    return Error "Akoya ingestion URL or service token not configured"
+            | _ ->
+                return Error "Provider not yet supported for sync trigger"
+    }
+
 // POST /internal/sync-trigger
 // Routes to the appropriate ingestion service based on the connection's provider.
 let syncTriggerHandler : HttpHandler = fun ctx ->
@@ -471,85 +741,15 @@ let syncTriggerHandler : HttpHandler = fun ctx ->
         let root = doc.RootElement
         let tenantId = requireGuid root "tenantId"
         let connectionId = requireGuid root "connectionId"
-
         let accessor = makeManualAccessor tenantId
         let factory = ctx.RequestServices.GetRequiredService<IDbConnectionFactory>()
-        let connRepo = DataFeedConnectionRepository.create factory accessor
-        let! connOpt = connRepo.GetAsync(connectionId)
-
-        match connOpt with
-        | None ->
-            ctx.Response.StatusCode <- 404
-            do! Response.ofJson {| error = "Connection not found" |} ctx
-        | Some conn ->
-            match DataFeedConnection.providerOf conn.Metadata with
-            | DataFeedProvider.Plaid ->
-                let plaid = ctx.RequestServices.GetRequiredService<IPlaidService>()
-                let! result = plaid.SyncConnectionAsync tenantId connectionId
-                do! Response.ofJson result ctx
-            | DataFeedProvider.Akoya ->
-                match akoyaIngestionUrl, serviceToken with
-                | Some url, Some token ->
-                    let http = ctx.RequestServices.GetRequiredService<HttpClient>()
-                    let vault = ctx.RequestServices.GetRequiredService<IVaultService>()
-                    let accountRepo = AccountRepository.create factory accessor
-
-                    let customerId, institutionId =
-                        match conn.Metadata with
-                        | ProviderMetadata.Akoya(c, i) -> c, i
-                        | _ -> failwith "Connection metadata is not Akoya"
-
-                    // Load vault credentials for this connection
-                    let! envelope =
-                        task {
-                            try
-                                return! vault.LoadAsync({ TenantId = tenantId; UserId = conn.UserId }, conn.CredentialRef)
-                            with :? KeyNotFoundException ->
-                                return failwith $"Vault credential not found for ref {conn.CredentialRef}"
-                        }
-
-                    // Build linked account mapping (externalId -> local accountId)
-                    let! linkedAccounts =
-                        conn.LinkedAccountIds
-                        |> List.map (fun accId -> task {
-                            let! accOpt = accountRepo.GetAsync(accId)
-                            return accOpt |> Option.map (fun a -> {| localAccountId = a.Id; externalAccountId = a.ExternalId |})
-                        })
-                        |> Task.WhenAll
-
-                    let req = new HttpRequestMessage(HttpMethod.Post, $"{url.TrimEnd('/')}/sync-trigger")
-                    req.Headers.Authorization <- System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
-                    let payload = System.Text.Json.Nodes.JsonObject()
-                    payload["tenantId"] <- System.Text.Json.Nodes.JsonValue.Create(tenantId.ToString())
-                    payload["connectionId"] <- System.Text.Json.Nodes.JsonValue.Create(connectionId.ToString())
-                    payload["customerId"] <- System.Text.Json.Nodes.JsonValue.Create(customerId)
-                    payload["institutionId"] <- System.Text.Json.Nodes.JsonValue.Create(institutionId)
-                    payload["accessToken"] <- System.Text.Json.Nodes.JsonValue.Create(envelope.AccessToken)
-
-                    let accountsArr = System.Text.Json.Nodes.JsonArray()
-                    for acc in linkedAccounts |> Array.choose id do
-                        let accObj = System.Text.Json.Nodes.JsonObject()
-                        accObj["localAccountId"] <- System.Text.Json.Nodes.JsonValue.Create(acc.localAccountId.ToString())
-                        match acc.externalAccountId with
-                        | Some extId -> accObj["externalAccountId"] <- System.Text.Json.Nodes.JsonValue.Create(extId)
-                        | None -> ()
-                        accountsArr.Add(accObj)
-                    payload["linkedAccounts"] <- accountsArr
-
-                    req.Content <- new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
-                    let! resp = http.SendAsync(req)
-                    let! body = resp.Content.ReadAsStringAsync()
-                    if not resp.IsSuccessStatusCode then
-                        ctx.Response.StatusCode <- (int)resp.StatusCode
-                        do! Response.ofJson {| error = "Akoya ingestion failed"; detail = body |} ctx
-                    else
-                        do! Response.ofJson {| status = "sync_triggered"; provider = "akoya"; connectionId = connectionId |} ctx
-                | _ ->
-                    ctx.Response.StatusCode <- 503
-                    do! Response.ofJson {| error = "Akoya ingestion URL or service token not configured" |} ctx
-            | _ ->
-                ctx.Response.StatusCode <- 501
-                do! Response.ofJson {| error = "Provider not yet supported for sync trigger" |} ctx
+        let http = ctx.RequestServices.GetRequiredService<HttpClient>()
+        let! result = triggerSyncForConnectionAsync http factory accessor connectionId
+        match result with
+        | Ok resp -> do! Response.ofJson resp ctx
+        | Error msg ->
+            ctx.Response.StatusCode <- 503
+            do! Response.ofJson {| error = msg |} ctx
     }
 
 // POST /webhooks/plaid
@@ -610,6 +810,17 @@ let plaidWebhookHandler : HttpHandler = fun ctx ->
                 do! Response.ofJson {| status = "ignored"; webhookType = webhookType; webhookCode = webhookCode |} ctx
     }
 
+// ── Static files (portal SPA) ────────────────────────────────────────────────
+
+let portalPath = Path.Combine(wapp.Environment.WebRootPath, "portal")
+if Directory.Exists(portalPath) then
+    wapp.UseStaticFiles(
+        new StaticFileOptions(
+            RequestPath = PathString("/portal"),
+            FileProvider = new PhysicalFileProvider(portalPath)
+        )
+    ) |> ignore
+
 // ── Application pipeline ──────────────────────────────────────────────────────
 
 wapp.UseMiddleware<TenantContextMiddleware>() |> ignore
@@ -620,6 +831,7 @@ wapp.UseRouting()
         get "/health" (Response.ofJson {| status = "ok"; version = version |})
         post "/auth/register" Auth.registerHandler
         post "/auth/login" Auth.loginHandler
+        post "/api/auth/cookie-set" Auth.cookieSetHandler
         get "/me" (AuthHelpers.requireAuth Auth.meHandler)
         get "/api/prices" pricesHandler
         // Accounts
@@ -631,16 +843,117 @@ wapp.UseRouting()
         patch "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.updateAccountHandler accountId ctx))
+        get "/api/accounts/{accountId:guid}/balance" (AuthHelpers.requireAuth (fun ctx ->
+            let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
+            AccountEndpoints.getBalanceHandler accountId ctx))
         delete "/api/accounts/{accountId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let accountId = ctx.Request.RouteValues.["accountId"] :?> Guid
             AccountEndpoints.deleteAccountHandler accountId ctx))
+        // Transfers and credit card payments
+        post "/api/transfers" (AuthHelpers.requireAuth TransferEndpoints.createTransferHandler)
+        post "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.createCreditCardPaymentHandler)
+        get "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.listCreditCardPaymentsHandler)
+        // Categories
+        get "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.listCategoriesHandler)
+        get "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.getCategoryHandler categoryId ctx))
+        post "/api/categories" (AuthHelpers.requireAuth CategoryEndpoints.createCategoryHandler)
+        patch "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.updateCategoryHandler categoryId ctx))
+        delete "/api/categories/{categoryId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let categoryId = ctx.Request.RouteValues.["categoryId"] :?> Guid
+            CategoryEndpoints.deleteCategoryHandler categoryId ctx))
+        // Transactions
+        get "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.listTransactionsHandler)
+        get "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.getTransactionHandler txnId ctx))
+        post "/api/transactions" (AuthHelpers.requireAuth TransactionEndpoints.createTransactionHandler)
+        patch "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.updateTransactionHandler txnId ctx))
+        delete "/api/transactions/{txnId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            TransactionEndpoints.deleteTransactionHandler txnId ctx))
+        // Splits
+        get "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitEndpoints.listSplitsHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            SplitEndpoints.createSplitHandler txnId ctx))
+        patch "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitEndpoints.updateSplitHandler txnId splitId ctx))
+        delete "/api/transactions/{txnId:guid}/splits/{splitId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            SplitEndpoints.deleteSplitHandler txnId splitId ctx))
+        // Attachments
+        post "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            AttachmentEndpoints.createTransactionAttachmentHandler txnId ctx))
+        post "/api/transactions/{txnId:guid}/splits/{splitId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            let splitId = ctx.Request.RouteValues.["splitId"] :?> Guid
+            AttachmentEndpoints.createSplitAttachmentHandler txnId splitId ctx))
+        get "/api/transactions/{txnId:guid}/attachments" (AuthHelpers.requireAuth (fun ctx ->
+            let txnId = ctx.Request.RouteValues.["txnId"] :?> Guid
+            AttachmentEndpoints.listTransactionAttachmentsHandler txnId ctx))
+        get "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            AttachmentEndpoints.getAttachmentHandler attachmentId ctx))
+        delete "/api/attachments/{attachmentId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attachmentId = ctx.Request.RouteValues.["attachmentId"] :?> Guid
+            AttachmentEndpoints.deleteAttachmentHandler attachmentId ctx))
+        // Connections
+        get "/api/connections" (AuthHelpers.requireAuth ConnectionEndpoints.listConnectionsHandler)
+        get "/api/connections/{connectionId:guid}/health-history" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.healthHistoryHandler connectionId ctx))
+        post "/api/connections/{connectionId:guid}/remediation-attempts" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.createRemediationAttemptHandler connectionId ctx))
+        patch "/api/remediation-attempts/{attemptId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let attemptId = ctx.Request.RouteValues.["attemptId"] :?> Guid
+            ConnectionEndpoints.updateRemediationAttemptHandler attemptId ctx))
+        // Plaid Link
+        post "/api/connections/plaid/link-token" (AuthHelpers.requireAuth ConnectionEndpoints.plaidLinkTokenHandler)
+        post "/api/connections/plaid/exchange" (AuthHelpers.requireAuth ConnectionEndpoints.plaidExchangeHandler)
+        post "/api/connections/akoya/authorize-url" (AuthHelpers.requireAuth ConnectionEndpoints.akoyaAuthorizeUrlHandler)
+        get "/api/connections/akoya/callback" ConnectionEndpoints.akoyaCallbackHandler
+        delete "/api/connections/{connectionId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.deleteConnectionHandler connectionId ctx))
+        post "/api/connections/{connectionId:guid}/reauth" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            ConnectionEndpoints.reauthConnectionHandler connectionId ctx))
+        // Transfers and credit card payments
+        post "/api/transfers" (AuthHelpers.requireAuth TransferEndpoints.createTransferHandler)
+        post "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.createCreditCardPaymentHandler)
+        get "/api/credit-card-payments" (AuthHelpers.requireAuth TransferEndpoints.listCreditCardPaymentsHandler)
         get "/api/transactions/needs-review" (AuthHelpers.requireAuth needsReviewHandler)
         post "/api/transactions/resolve" (AuthHelpers.requireAuth resolveHandler)
         post "/internal/transactions/upsert" internalUpsertHandler
         post "/internal/transactions/remove" internalTransactionsRemoveHandler
         post "/internal/connections/status" internalConnectionStatusHandler
+        get "/internal/connections/{connectionId:guid}/credentials" (requireServiceToken serviceToken internalConnectionCredentialsHandler)
         post "/internal/sync-trigger" syncTriggerHandler
         post "/webhooks/plaid" plaidWebhookHandler
+        get "/api/categories" (AuthHelpers.requireAuth (fun ctx ->
+            task {
+                let categoryRepo = ctx.RequestServices.GetRequiredService<ICategoryRepository>()
+                let! categories = categoryRepo.ListAsync()
+                let responses =
+                    categories
+                    |> List.map (fun c ->
+                        {| id = c.Id; name = c.Name; color = (None :> string option) |})
+                do! Response.ofJson {| categories = responses |} ctx
+            }))
+        get "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.listBudgetsHandler)
         post "/api/budgets" (AuthHelpers.requireAuth BudgetEndpoints.createBudgetHandler)
         get "/api/budgets/{budgetId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
@@ -661,6 +974,40 @@ wapp.UseRouting()
             let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
             let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
             BudgetEndpoints.closePeriodHandler budgetId periodId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/{periodId:guid}/report" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            BudgetEndpoints.getReportHandler budgetId periodId ctx))
+        get "/api/budgets/{budgetId:guid}/periods/current/report" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            BudgetEndpoints.getCurrentReportHandler budgetId ctx))
+        // Exports
+        get "/api/exports/transactions.csv" (AuthHelpers.requireAuth ExportEndpoints.exportTransactionsHandler)
+        get "/api/exports/accounts.csv" (AuthHelpers.requireAuth ExportEndpoints.exportAccountsHandler)
+        get "/api/exports/budgets/{budgetId:guid}/period/{periodId:guid}.csv" (AuthHelpers.requireAuth (fun ctx ->
+            let budgetId = ctx.Request.RouteValues.["budgetId"] :?> Guid
+            let periodId = ctx.Request.RouteValues.["periodId"] :?> Guid
+            ExportEndpoints.exportBudgetPeriodHandler budgetId periodId ctx))
+        get "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.getPreferencesHandler)
+        patch "/api/preferences" (AuthHelpers.requireAuth UserPreferencesEndpoints.updatePreferencesHandler)
+        // Onboarding
+        get "/api/onboarding" (AuthHelpers.requireAuth getOnboardingHandler)
+        patch "/api/onboarding" (AuthHelpers.requireAuth patchOnboardingHandler)
+        // Reconciliations
+        get "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.listReconciliationsHandler)
+        post "/api/reconciliations" (AuthHelpers.requireAuth ReconciliationEndpoints.createReconciliationHandler)
+        get "/api/reconciliations/{reconciliationId:guid}" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.getReconciliationHandler id ctx))
+        patch "/api/reconciliations/{reconciliationId:guid}/transactions" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.updateTransactionsHandler id ctx))
+        post "/api/reconciliations/{reconciliationId:guid}/complete" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.completeHandler id ctx))
+        post "/api/reconciliations/{reconciliationId:guid}/abort" (AuthHelpers.requireAuth (fun ctx ->
+            let id = ctx.Request.RouteValues.["reconciliationId"] :?> Guid
+            ReconciliationEndpoints.abortHandler id ctx))
         // Role-gated canary endpoint for integration tests
         get "/admin-only" (AuthHelpers.requireRole "owner" (Response.ofJson {| message = "ok" |}))
         // API key management
@@ -669,7 +1016,47 @@ wapp.UseRouting()
         delete "/api/api-keys/{keyId:guid}" (AuthHelpers.requireAuth (fun ctx ->
             let keyId = ctx.Request.RouteValues.["keyId"] :?> Guid
             Auth.revokeApiKeyHandler keyId ctx))
+        // Data feed connections
+        post "/api/connections/{connectionId:guid}/sync" (AuthHelpers.requireAuth (fun ctx ->
+            let connectionId = ctx.Request.RouteValues.["connectionId"] :?> Guid
+            task {
+                let connRepo = ctx.RequestServices.GetRequiredService<IDataFeedConnectionRepository>()
+                let bus = ctx.RequestServices.GetRequiredService<IEventBus>()
+                let! connOpt = connRepo.GetAsync(connectionId)
+                match connOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 404
+                    do! Response.ofJson {| error = "Connection not found" |} ctx
+                | Some conn ->
+                    let predictedSyncEventId = Guid.NewGuid()
+                    let payload =
+                        {| tenantId = conn.TenantId
+                           connectionId = conn.Id
+                           accountId = (None : Guid option) |}
+                    let json = System.Text.Json.JsonSerializer.Serialize(payload)
+                    let envelope =
+                        { Topic = EventBusTopics.syncRequested
+                          JsonPayload = json
+                          OccurredAt = DateTimeOffset.UtcNow
+                          CausationId = None }
+                    do! bus.Publish(envelope)
+                    ctx.Response.StatusCode <- 202
+                    do! Response.ofJson {| syncEventId = predictedSyncEventId |} ctx
+            }))
         // MCP server route group
         post "/mcp" (AuthHelpers.requireAuth McpServer.mcpHandler)
+        // SPA fallthrough for portal routes
+        get "/portal/{*path}" (fun ctx ->
+            let indexPath = Path.Combine(portalPath, "index.html")
+            if File.Exists(indexPath) then
+                task {
+                    ctx.Response.ContentType <- "text/html"
+                    let! bytes = File.ReadAllBytesAsync(indexPath)
+                    do! ctx.Response.Body.WriteAsync(bytes, 0, bytes.Length)
+                }
+            else
+                ctx.Response.StatusCode <- 404
+                Response.ofPlainText "Portal not built" ctx
+        )
     ])
     .Run(Response.ofPlainText "Not found")

@@ -182,6 +182,9 @@ type Transaction = {
     /// Transaction date — when the activity happened from the user's perspective
     /// (e.g. the moment of swipe). This is the date users recall and the UI sorts by.
     OccurredAt: DateTimeOffset
+    /// Soft-delete timestamp. When Some the transaction is logically deleted
+    /// and excluded from list/get results.
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
 }
@@ -273,7 +276,11 @@ type Category = {
     Name: string
     ParentCategoryId: Guid option
     IsSystem: bool
+    CurrencyCode: string
+    RolloverEnabled: bool
+    DeletedAt: DateTimeOffset option
     CreatedAt: DateTimeOffset
+    UpdatedAt: DateTimeOffset
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -475,9 +482,9 @@ type FeedHealthLevel =
     | Unknown
 
 /// Coarse, computed projection of feed connection health. See ADR-011.
-/// Placeholder shape — full evaluation rules live with the remediation flow.
 type FeedHealth = {
     ConnectionId: Guid
+    TenantId: Guid
     Level: FeedHealthLevel
     LastSuccessAt: DateTimeOffset option
     LastFailureAt: DateTimeOffset option
@@ -514,9 +521,9 @@ type RemediationAttempt = {
 
 [<RequireQualifiedAccess>]
 type ReconciliationStatus =
-    | InProgress
+    | Open
     | Completed
-    | Abandoned
+    | Aborted
 
 type Reconciliation = {
     Id: Guid
@@ -525,8 +532,8 @@ type Reconciliation = {
     StatementBalance: Money
     StatementDate: DateOnly
     Status: ReconciliationStatus
-    MatchedCount: int
-    UnmatchedCount: int
+    Note: string option
+    CreatedByUserId: Guid
     StartedAt: DateTimeOffset
     CompletedAt: DateTimeOffset option
 }
@@ -595,4 +602,25 @@ type UserPreferences = {
     /// [15 minutes, 24 hours]; values outside that range are clamped.
     /// See ADR-005 for the rationale.
     PreferredSyncFrequency: TimeSpan
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding
+// ─────────────────────────────────────────────────────────────────────────────
+
+[<RequireQualifiedAccess>]
+type OnboardingStep =
+    | CreateAccount = 1
+    | CreateTenant = 2
+    | ConnectFirstFeed = 3
+    | SetInitialBudget = 4
+    | Done = 5
+
+type OnboardingState = {
+    TenantId: Guid
+    CurrentStep: int
+    StartedAt: DateTimeOffset
+    CompletedAt: DateTimeOffset option
+    CompletedSteps: int list
+    Skipped: bool
 }

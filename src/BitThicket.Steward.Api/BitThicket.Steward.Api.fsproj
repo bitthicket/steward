@@ -6,25 +6,51 @@
 
   <ItemGroup>
     <Compile Include="Domain.fs" />
+    <Compile Include="Money.fs" />
     <Compile Include="Migrations.fs" />
     <Compile Include="TenantContext.fs" />
     <Compile Include="Persistence.fs" />
     <Compile Include="AccountRepository.fs" />
     <Compile Include="CategoryRepository.fs" />
     <Compile Include="TransactionRepository.fs" />
+    <Compile Include="CreditCardPaymentRepository.fs" />
     <Compile Include="TransactionMatcher.fs" />
+    <Compile Include="AttachmentStorage.fs" />
+    <Compile Include="SplitRepository.fs" />
+    <Compile Include="AttachmentRepository.fs" />
+    <Compile Include="TransactionEndpoints.fs" />
+    <Compile Include="SplitEndpoints.fs" />
+    <Compile Include="AttachmentEndpoints.fs" />
+    <Compile Include="ReconciliationRepository.fs" />
     <Compile Include="VaultService.fs" />
+    <Compile Include="EventBus.fs" />
     <Compile Include="DataFeedConnectionRepository.fs" />
+    <Compile Include="SyncEventRepository.fs" />
     <Compile Include="PlaidService.fs" />
+    <Compile Include="AkoyaOAuthService.fs" />
     <Compile Include="BudgetRepository.fs" />
     <Compile Include="BudgetPeriodRepository.fs" />
+    <Compile Include="UserPreferencesRepository.fs" />
+    <Compile Include="OnboardingRepository.fs" />
     <Compile Include="ApiKeyRepository.fs" />
+    <Compile Include="FeedHealthRepository.fs" />
+    <Compile Include="RemediationAttemptRepository.fs" />
     <Compile Include="Pricing.fs" />
     <Compile Include="BudgetEndpoints.fs" />
+    <Compile Include="ExportEndpoints.fs" />
     <Compile Include="AccountEndpoints.fs" />
+    <Compile Include="TransferEndpoints.fs" />
+    <Compile Include="CategoryEndpoints.fs" />
+    <Compile Include="ReconciliationEndpoints.fs" />
+    <Compile Include="UserPreferencesEndpoints.fs" />
+    <Compile Include="ConnectionEndpoints.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="McpServer.fs" />
     <Compile Include="PricingWorker.fs" />
+    <Compile Include="FeedHealthWorker.fs" />
+    <Compile Include="AkoyaTokenRefreshWorker.fs" />
+    <Compile Include="SyncCoordinator.fs" />
+    <Compile Include="Logging.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -38,6 +64,8 @@
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.*" />
     <PackageReference Include="FSharp.SystemTextJson" Version="1.*" />
     <PackageReference Include="Npgsql" Version="10.0.1" />
+    <PackageReference Include="Serilog" Version="4.*" />
+    <PackageReference Include="Serilog.AspNetCore" Version="9.*" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
   </ItemGroup>
 </Project>

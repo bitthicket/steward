@@ -51,6 +51,19 @@ type TokenBucket(capacity: int, refillPerSecond: float) =
 module private CoinGeckoIds =
     let map = Map.ofList [ ("BTC", "bitcoin"); ("ETH", "ethereum") ]
 
+module PriceConversion =
+    open BitThicket.Steward.Api.Domain
+
+    let convertMoneyAsync (pricing: IPriceProvider) (money: Money) (displayCurrency: string) : Task<Money> =
+        task {
+            let target = displayCurrency.ToUpperInvariant()
+            if money.CurrencyCode.ToUpperInvariant() = target then
+                return money
+            else
+                let! rate = pricing.GetSpotAsync(money.CurrencyCode, target)
+                return { Amount = money.Amount * rate.Value; CurrencyCode = target }
+        }
+
 type CoinGeckoPriceProvider(http: HttpClient, db: NpgsqlDataSource, logger: ILogger<CoinGeckoPriceProvider>) =
     let bucket = TokenBucket(10, 50.0 / 60.0)
 

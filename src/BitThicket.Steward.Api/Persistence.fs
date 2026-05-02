@@ -57,6 +57,9 @@ module Sql =
     let dateTimeOffset (reader: DbDataReader) (ordinal: int) =
         DateTimeOffset(reader.GetDateTime(ordinal), TimeSpan.Zero)
 
+    let dateOnly (reader: DbDataReader) (ordinal: int) =
+        DateOnly.FromDateTime(reader.GetDateTime(ordinal))
+
     let nullableGuid (reader: DbDataReader) (ordinal: int) =
         if reader.IsDBNull(ordinal) then None else Some(reader.GetGuid(ordinal))
 

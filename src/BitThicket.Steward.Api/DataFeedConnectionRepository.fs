@@ -12,6 +12,7 @@ open BitThicket.Steward.Api.Domain
 type IDataFeedConnectionRepository =
     abstract GetAsync : id:Guid -> Task<DataFeedConnection option>
     abstract GetByItemIdAsync : itemId:string -> Task<DataFeedConnection option>
+    abstract ListAsync : unit -> Task<DataFeedConnection list>
     abstract CreateAsync : connection:DataFeedConnection -> Task<Guid>
     abstract UpdateAsync : connection:DataFeedConnection -> Task<unit>
 
@@ -73,6 +74,23 @@ module DataFeedConnectionRepository =
         }
 
     /// Global lookup by Plaid item_id. Bypasses RLS via SECURITY DEFINER function.
+    let listAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """SELECT id, tenant_id, user_id, provider_metadata, credential_ref, status,
+                          linked_account_ids, created_at, updated_at
+                   FROM data_feed_connections
+                   ORDER BY created_at DESC"""
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let results = ResizeArray<DataFeedConnection>()
+            while! reader.ReadAsync() do
+                results.Add(mapConnection reader)
+            return results |> Seq.toList
+        }
+
     let getByItemIdAsync (factory: IDbConnectionFactory) (itemId: string) =
         task {
             use! conn = factory.OpenAsync()
@@ -167,6 +185,7 @@ module DataFeedConnectionRepository =
         { new IDataFeedConnectionRepository with
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
             member _.GetByItemIdAsync(itemId) = getByItemIdAsync factory itemId
+            member _.ListAsync() = listAsync factory (requireCtx())
             member _.CreateAsync(connection) = createAsync factory connection
             member _.UpdateAsync(connection) = updateAsync factory connection
         }

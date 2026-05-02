@@ -12,6 +12,7 @@ type IAccountRepository =
     abstract GetAsync : id:Guid -> Task<Account option>
     abstract GetByExternalIdAsync : externalId:string -> Task<Account option>
     abstract ListAsync : unit -> Task<Account list>
+    abstract GetBalanceAsync : id:Guid -> Task<Balance option>
     abstract CreateAsync : account:Account -> Task<Guid>
     abstract UpdateAsync : account:Account -> Task<unit>
     abstract DeleteAsync : id:Guid -> Task<unit>
@@ -219,6 +220,36 @@ module AccountRepository =
             return ()
         }
 
+    let getBalanceAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (id: Guid) =
+        task {
+            use! conn = factory.OpenForTenantAsync(tenantContext)
+            use cmd = conn.CreateCommand()
+            // We need the account currency to build Money values.
+            cmd.CommandText <-
+                """SELECT currency,
+                          COALESCE(SUM(amount_minor) FILTER (WHERE posted_at IS NOT NULL AND status IN ('cleared', 'reconciled')), 0) AS posted,
+                          COALESCE(SUM(amount_minor) FILTER (WHERE status = 'pending'), 0) AS pending
+                   FROM accounts
+                   LEFT JOIN transactions ON transactions.account_id = accounts.id
+                   WHERE accounts.id = $1 AND accounts.deleted_at IS NULL
+                   GROUP BY accounts.currency"""
+            cmd.Parameters.AddWithValue("$1", id) |> ignore
+            let! reader = cmd.ExecuteReaderAsync()
+            use reader = reader
+            let! hasRow = reader.ReadAsync()
+            return
+                if hasRow then
+                    let currency = reader.GetString(0)
+                    let postedMinor = reader.GetInt64(1)
+                    let pendingMinor = reader.GetInt64(2)
+                    let posted = MoneyHelpers.fromMinorUnits postedMinor currency
+                    let pending = MoneyHelpers.fromMinorUnits pendingMinor currency
+                    let available = { Amount = posted.Amount + pending.Amount; CurrencyCode = currency }
+                    Some { Posted = posted; Available = available; Pending = pending }
+                else
+                    None
+        }
+
     let deleteAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (id: Guid) =
         task {
             use! conn = factory.OpenForTenantAsync(tenantContext)
@@ -246,6 +277,7 @@ module AccountRepository =
             member _.GetAsync(id) = getAsync factory (requireCtx()) id
             member _.GetByExternalIdAsync(externalId) = getByExternalIdAsync factory (requireCtx()) externalId
             member _.ListAsync() = listAsync factory (requireCtx())
+            member _.GetBalanceAsync(id) = getBalanceAsync factory (requireCtx()) id
             member _.CreateAsync(account) = createAsync factory account
             member _.UpdateAsync(account) = updateAsync factory account
             member _.DeleteAsync(id) = deleteAsync factory (requireCtx()) id
