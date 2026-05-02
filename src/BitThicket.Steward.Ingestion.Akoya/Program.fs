@@ -251,7 +251,7 @@ module InternalApiClient =
                 return Error $"Core API request failed: {ex.Message}"
         }
 
-    let postConnectionStatus (http: HttpClient) (connectionId: Guid) (status: string) (message: string option) =
+    let postConnectionStatus (http: HttpClient) (connectionId: Guid) (status: string) (message: string option) (lastSyncedAt: DateTimeOffset option) =
         task {
             try
                 let root = System.Text.Json.Nodes.JsonObject()
@@ -259,6 +259,9 @@ module InternalApiClient =
                 root["status"] <- System.Text.Json.Nodes.JsonValue.Create(status)
                 match message with
                 | Some m -> root["message"] <- System.Text.Json.Nodes.JsonValue.Create(m)
+                | None -> ()
+                match lastSyncedAt with
+                | Some d -> root["lastSyncedAt"] <- System.Text.Json.Nodes.JsonValue.Create(d.ToString("O"))
                 | None -> ()
 
                 let req = buildRequest "POST" "/internal/connections/status" (Some(root.ToJsonString()))
@@ -401,7 +404,7 @@ let syncTriggerHandler (clientFactory: HttpClient -> IAkoyaClient) (http: HttpCl
                         let status =
                             if akoyaErrorMessage.Contains("401") then "needsreauth"
                             else "error"
-                        let! _ = InternalApiClient.postConnectionStatus http connectionId status (Some akoyaErrorMessage)
+                        let! _ = InternalApiClient.postConnectionStatus http connectionId status (Some akoyaErrorMessage) None
                         ctx.Response.StatusCode <- 502
                         do! Response.ofJson {| error = "Akoya FDX request failed"; detail = akoyaErrorMessage |} ctx
                     else
@@ -455,7 +458,7 @@ let syncTriggerHandler (clientFactory: HttpClient -> IAkoyaClient) (http: HttpCl
                         if allNormalized.IsEmpty && fetchErrors.Count > 0 then
                             let status = if fetchErrors |> Seq.exists (fun e -> e.Contains("401")) then "needsreauth" else "error"
                             let detail = String.Join("; ", fetchErrors)
-                            let! _ = InternalApiClient.postConnectionStatus http connectionId status (Some detail)
+                            let! _ = InternalApiClient.postConnectionStatus http connectionId status (Some detail) None
                             ctx.Response.StatusCode <- 502
                             do! Response.ofJson {| error = "Failed to fetch transactions from Akoya"; detail = detail |} ctx
                         else
@@ -500,8 +503,15 @@ let syncTriggerHandler (clientFactory: HttpClient -> IAkoyaClient) (http: HttpCl
                                 // Update connection status if there were fetch errors
                                 if fetchErrors.Count > 0 then
                                     let detail = String.Join("; ", fetchErrors)
-                                    let! _ = InternalApiClient.postConnectionStatus http connectionId "error" (Some detail)
+                                    let! _ = InternalApiClient.postConnectionStatus http connectionId "error" (Some detail) None
                                     ()
+
+                                // Update watermark — success means we've processed through now()
+                                let! _ =
+                                    if fetchErrors.Count = 0 then
+                                        InternalApiClient.postConnectionStatus http connectionId "active" None (Some DateTimeOffset.UtcNow)
+                                    else
+                                        Task.FromResult(Ok())
 
                                 let response =
                                     {|

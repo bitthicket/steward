@@ -611,6 +611,7 @@ let internalConnectionStatusHandler : HttpHandler = fun ctx ->
         let connectionId = requireGuid root "id"
         let statusStr = requireString root "status"
         let messageOpt = tryGetString root "message"
+        let lastSyncedAtOpt = tryGetDateTime root "lastSyncedAt"
         let! connOpt = connRepo.GetAsync(connectionId)
         match connOpt with
         | None ->
@@ -624,7 +625,11 @@ let internalConnectionStatusHandler : HttpHandler = fun ctx ->
                 | "disabled" -> ConnectionStatus.Disabled
                 | "error" -> ConnectionStatus.Error(messageOpt |> Option.defaultValue "Unknown error")
                 | _ -> ConnectionStatus.Error($"Invalid status: {statusStr}")
-            let updated = { conn with Status = newStatus; UpdatedAt = DateTimeOffset.UtcNow }
+            let updated =
+                { conn with
+                    Status = newStatus
+                    UpdatedAt = DateTimeOffset.UtcNow
+                    LastSyncedAt = lastSyncedAtOpt |> Option.orElse conn.LastSyncedAt }
             do! connRepo.UpdateAsync(updated)
             do! Response.ofJson {| status = "updated"; connectionId = connectionId |} ctx
     }
