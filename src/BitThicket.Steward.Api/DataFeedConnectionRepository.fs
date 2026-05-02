@@ -56,6 +56,9 @@ module DataFeedConnectionRepository =
             LinkedAccountIds = linkedAccountIdsFromJsonb reader 6
             CreatedAt = Sql.dateTimeOffset reader 7
             UpdatedAt = Sql.dateTimeOffset reader 8
+            LastSyncedAt =
+                if reader.IsDBNull(9) then None
+                else Some(Sql.dateTimeOffset reader 9)
         }
 
     let getAsync (factory: IDbConnectionFactory) (tenantContext: TenantContext) (id: Guid) =
@@ -64,7 +67,7 @@ module DataFeedConnectionRepository =
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, provider_metadata, credential_ref, status,
-                          linked_account_ids, created_at, updated_at
+                          linked_account_ids, created_at, updated_at, last_synced_at
                    FROM data_feed_connections WHERE id = $1"""
             cmd.Parameters.AddWithValue("$1", id) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
@@ -80,7 +83,7 @@ module DataFeedConnectionRepository =
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, provider_metadata, credential_ref, status,
-                          linked_account_ids, created_at, updated_at
+                          linked_account_ids, created_at, updated_at, last_synced_at
                    FROM data_feed_connections
                    ORDER BY created_at DESC"""
             let! reader = cmd.ExecuteReaderAsync()
@@ -97,7 +100,7 @@ module DataFeedConnectionRepository =
             use cmd = conn.CreateCommand()
             cmd.CommandText <-
                 """SELECT id, tenant_id, user_id, provider_metadata, credential_ref, status,
-                          linked_account_ids, created_at, updated_at
+                          linked_account_ids, created_at, updated_at, last_synced_at
                    FROM get_data_feed_connection_by_item_id($1)"""
             cmd.Parameters.AddWithValue("$1", itemId) |> ignore
             let! reader = cmd.ExecuteReaderAsync()
@@ -114,8 +117,8 @@ module DataFeedConnectionRepository =
             cmd.CommandText <-
                 """INSERT INTO data_feed_connections (
                        id, tenant_id, user_id, provider_metadata, credential_ref, status,
-                       linked_account_ids, created_at, updated_at
-                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"""
+                       linked_account_ids, created_at, updated_at, last_synced_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"""
             cmd.Parameters.AddWithValue("$1", connection.Id) |> ignore
             cmd.Parameters.AddWithValue("$2", connection.TenantId) |> ignore
             cmd.Parameters.AddWithValue("$3", connection.UserId) |> ignore
@@ -137,6 +140,13 @@ module DataFeedConnectionRepository =
             cmd.Parameters.Add(linkedParam) |> ignore
             cmd.Parameters.AddWithValue("$8", connection.CreatedAt.UtcDateTime) |> ignore
             cmd.Parameters.AddWithValue("$9", connection.UpdatedAt.UtcDateTime) |> ignore
+            let lastSyncedParam = cmd.CreateParameter()
+            lastSyncedParam.ParameterName <- "$10"
+            lastSyncedParam.NpgsqlDbType <- NpgsqlTypes.NpgsqlDbType.TimestampTz
+            match connection.LastSyncedAt with
+            | Some d -> lastSyncedParam.Value <- d.UtcDateTime
+            | None -> lastSyncedParam.Value <- DBNull.Value
+            cmd.Parameters.Add(lastSyncedParam) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return connection.Id
         }
@@ -152,8 +162,9 @@ module DataFeedConnectionRepository =
                        credential_ref = $2,
                        status = $3,
                        linked_account_ids = $4,
-                       updated_at = $5
-                   WHERE id = $6"""
+                       updated_at = $5,
+                       last_synced_at = $6
+                   WHERE id = $7"""
             let metaParam = cmd.CreateParameter()
             metaParam.ParameterName <- "$1"
             metaParam.NpgsqlDbType <- NpgsqlTypes.NpgsqlDbType.Jsonb
@@ -171,7 +182,14 @@ module DataFeedConnectionRepository =
             linkedParam.Value <- linkedAccountIdsToJsonb connection.LinkedAccountIds
             cmd.Parameters.Add(linkedParam) |> ignore
             cmd.Parameters.AddWithValue("$5", DateTimeOffset.UtcNow.UtcDateTime) |> ignore
-            cmd.Parameters.AddWithValue("$6", connection.Id) |> ignore
+            let lastSyncedParam = cmd.CreateParameter()
+            lastSyncedParam.ParameterName <- "$6"
+            lastSyncedParam.NpgsqlDbType <- NpgsqlTypes.NpgsqlDbType.TimestampTz
+            match connection.LastSyncedAt with
+            | Some d -> lastSyncedParam.Value <- d.UtcDateTime
+            | None -> lastSyncedParam.Value <- DBNull.Value
+            cmd.Parameters.Add(lastSyncedParam) |> ignore
+            cmd.Parameters.AddWithValue("$7", connection.Id) |> ignore
             let! _ = cmd.ExecuteNonQueryAsync()
             return ()
         }

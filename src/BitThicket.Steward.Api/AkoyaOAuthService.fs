@@ -416,6 +416,7 @@ type AkoyaOAuthService(
                         LinkedAccountIds = []
                         CreatedAt = now
                         UpdatedAt = now
+                        LastSyncedAt = None
                     }
 
                     // Create manual accessor and repositories for callback (no HTTP context)

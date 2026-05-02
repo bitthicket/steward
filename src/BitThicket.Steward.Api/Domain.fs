@@ -436,6 +436,9 @@ type DataFeedConnection = {
     LinkedAccountIds: Guid list
     CreatedAt: DateTimeOffset
     UpdatedAt: DateTimeOffset
+    /// Timestamp of the most recently completed sync for this connection.
+    /// Set by the sync coordinator / ingestion pipeline. None means never synced.
+    LastSyncedAt: DateTimeOffset option
 }
 
 module DataFeedConnection =

@@ -24,6 +24,7 @@ type FdxTransaction = {
     TransactionDate: DateTimeOffset
     PostingDate: DateTimeOffset option
     Memo: string option
+    DebitCredit: string option  // "DEBIT" | "CREDIT"
 }
 
 type FdxAccountsResponse = {
@@ -61,7 +62,7 @@ type SyncTriggerResult = {
 
 type IAkoyaClient =
     abstract FetchAccountsAsync : customerId:string * institutionId:string * accessToken:string -> Task<FdxAccount list>
-    abstract FetchTransactionsAsync : customerId:string * institutionId:string * accessToken:string * accountId:string -> Task<FdxTransaction list>
+    abstract FetchTransactionsAsync : customerId:string * institutionId:string * accessToken:string * accountId:string * startDate:DateTimeOffset option -> Task<FdxTransaction list>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stubbed FDX client — returns canned data so wiring is testable end-to-end.
@@ -92,7 +93,7 @@ type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
                 ]
             }
 
-        member _.FetchTransactionsAsync(customerId, institutionId, accessToken, accountId) =
+        member _.FetchTransactionsAsync(customerId, institutionId, accessToken, accountId, startDate) =
             task {
                 requestCount <- requestCount + 1
                 let now = DateTimeOffset.UtcNow
@@ -101,22 +102,24 @@ type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
                     {
                         TransactionId = $"akoya-txn-{accountId}-001"
                         AccountId = accountId
-                        Amount = -42.50m
+                        Amount = 42.50m
                         Currency = "USD"
                         Description = "Stub Coffee Shop"
                         TransactionDate = now.AddDays(-1.0)
                         PostingDate = Some(now.AddDays(-1.0))
                         Memo = None
+                        DebitCredit = Some "DEBIT"
                     }
                     {
                         TransactionId = $"akoya-txn-{accountId}-002"
                         AccountId = accountId
-                        Amount = -123.45m
+                        Amount = 123.45m
                         Currency = "USD"
                         Description = "Stub Grocery Store"
                         TransactionDate = now.AddDays(-3.0)
                         PostingDate = Some(now.AddDays(-2.0))
                         Memo = None
+                        DebitCredit = Some "DEBIT"
                     }
                     {
                         TransactionId = $"akoya-txn-{accountId}-003"
@@ -127,9 +130,32 @@ type StubAkoyaClient(config: AkoyaConfig, http: HttpClient) =
                         TransactionDate = now.AddDays(-5.0)
                         PostingDate = Some(now.AddDays(-5.0))
                         Memo = None
+                        DebitCredit = Some "CREDIT"
                     }
                 ]
             }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retry / backoff for Akoya FDX HTTP client (429 handling)
+// ─────────────────────────────────────────────────────────────────────────────
+
+module AkoyaHttpRetry =
+    open System.Threading
+
+    let rec retryWithBackoff (http: HttpClient) (buildRequest: unit -> HttpRequestMessage) (maxRetries: int) (attempt: int) =
+        task {
+            use req = buildRequest()
+            let! resp = http.SendAsync(req)
+            if int resp.StatusCode = 429 && attempt < maxRetries then
+                let delayMs = pown 2 attempt * 1000  // 1s, 2s, 4s, 8s...
+                do! Task.Delay(delayMs)
+                return! retryWithBackoff http buildRequest maxRetries (attempt + 1)
+            else
+                let! body = resp.Content.ReadAsStringAsync()
+                if not resp.IsSuccessStatusCode then
+                    failwith $"Akoya FDX error {(int)resp.StatusCode}: {body}"
+                return body
+        }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Real FDX HTTP client — calls Akoya FDX API for accounts and transactions.
@@ -223,11 +249,17 @@ type AkoyaFdxHttpClient(config: AkoyaConfig, http: HttpClient) =
                 match el.TryGetProperty("memo") with
                 | true, p when p.ValueKind <> System.Text.Json.JsonValueKind.Null -> Some(p.GetString())
                 | _ -> None
+            DebitCredit =
+                match el.TryGetProperty("debitCreditMemo") with
+                | true, p -> Some(p.GetString().ToUpperInvariant())
+                | _ ->
+                    match el.TryGetProperty("debit_credit_memo") with
+                    | true, p -> Some(p.GetString().ToUpperInvariant())
+                    | _ -> None
         }
 
     let parseAccountsResponse (doc: System.Text.Json.JsonDocument) : FdxAccount list =
         let root = doc.RootElement
-        // Try object-wrapped array first, then bare array
         match root.ValueKind with
         | System.Text.Json.JsonValueKind.Array ->
             root.EnumerateArray() |> Seq.map parseAccount |> Seq.toList
@@ -249,28 +281,34 @@ type AkoyaFdxHttpClient(config: AkoyaConfig, http: HttpClient) =
     interface IAkoyaClient with
         member _.FetchAccountsAsync(customerId: string, institutionId: string, accessToken: string) =
             task {
-                let url = $"{baseUrl}/fdx/v1/accounts"
-                let req = new HttpRequestMessage(HttpMethod.Get, url)
-                req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
-                req.Headers.Add("x-akoya-institution-id", institutionId)
-                let! resp = http.SendAsync(req)
-                let! body = resp.Content.ReadAsStringAsync()
-                if not resp.IsSuccessStatusCode then
-                    failwith $"Akoya FDX accounts error {(int)resp.StatusCode}: {body}"
+                let buildReq () =
+                    let url = $"{baseUrl}/fdx/v1/accounts"
+                    let req = new HttpRequestMessage(HttpMethod.Get, url)
+                    req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
+                    req.Headers.Add("x-akoya-institution-id", institutionId)
+                    req
+
+                let! body = AkoyaHttpRetry.retryWithBackoff http buildReq 3 0
                 use doc = System.Text.Json.JsonDocument.Parse(body)
                 return parseAccountsResponse doc
             }
 
-        member _.FetchTransactionsAsync(customerId: string, institutionId: string, accessToken: string, accountId: string) =
+        member _.FetchTransactionsAsync(customerId: string, institutionId: string, accessToken: string, accountId: string, startDate: DateTimeOffset option) =
             task {
-                let url = $"{baseUrl}/fdx/v1/accounts/{accountId}/transactions"
-                let req = new HttpRequestMessage(HttpMethod.Get, url)
-                req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
-                req.Headers.Add("x-akoya-institution-id", institutionId)
-                let! resp = http.SendAsync(req)
-                let! body = resp.Content.ReadAsStringAsync()
-                if not resp.IsSuccessStatusCode then
-                    failwith $"Akoya FDX transactions error {(int)resp.StatusCode}: {body}"
+                let buildReq () =
+                    let query =
+                        match startDate with
+                        | Some d ->
+                            let dStr = d.ToString("yyyy-MM-dd")
+                            $"?startDate={dStr}"
+                        | None -> ""
+                    let url = $"{baseUrl}/fdx/v1/accounts/{accountId}/transactions{query}"
+                    let req = new HttpRequestMessage(HttpMethod.Get, url)
+                    req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
+                    req.Headers.Add("x-akoya-institution-id", institutionId)
+                    req
+
+                let! body = AkoyaHttpRetry.retryWithBackoff http buildReq 3 0
                 use doc = System.Text.Json.JsonDocument.Parse(body)
                 return parseTransactionsResponse doc
             }
@@ -289,13 +327,21 @@ module AkoyaNormalization =
         let factor = pown 10m places
         int64 (amount * factor)
 
+    /// Per ADR-001: Debit (outflow) is negative, Credit (inflow) is positive.
+    let applySign (rawAmount: decimal) (debitCredit: string option) : decimal =
+        match debitCredit with
+        | Some "DEBIT" -> -abs rawAmount
+        | Some "CREDIT" -> abs rawAmount
+        | _ -> rawAmount  // passthrough if unknown
+
     let normalize (fdx: FdxTransaction) : NormalizedTransaction =
+        let signedAmount = applySign fdx.Amount fdx.DebitCredit
         {
             ExternalId = fdx.TransactionId
             AccountId = fdx.AccountId
             OccurredAt = fdx.TransactionDate
             PostedAt = fdx.PostingDate
-            AmountMinor = toMinorUnits fdx.Amount fdx.Currency
+            AmountMinor = toMinorUnits signedAmount fdx.Currency
             Currency = fdx.Currency
             Description = fdx.Description
             Merchant = fdx.Memo

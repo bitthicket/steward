@@ -559,6 +559,7 @@ module ConnectionEndpoints =
                         LinkedAccountIds = []
                         CreatedAt = now
                         UpdatedAt = now
+                        LastSyncedAt = None
                     }
                     let! _ = connRepo.CreateAsync(connection)
                     ()
