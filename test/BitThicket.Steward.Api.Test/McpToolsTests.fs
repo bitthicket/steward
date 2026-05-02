@@ -394,7 +394,7 @@ type McpToolsTests() =
                 Id = Guid.NewGuid(); TenantId = tenantId; UserId = userId
                 Metadata = ProviderMetadata.Plaid("item-1", "inst-1", None)
                 CredentialRef = "cred-1"; Status = ConnectionStatus.Active
-                LinkedAccountIds = []; CreatedAt = DateTimeOffset.UtcNow; UpdatedAt = DateTimeOffset.UtcNow
+                LinkedAccountIds = []; LastSyncedAt = None; CreatedAt = DateTimeOffset.UtcNow; UpdatedAt = DateTimeOffset.UtcNow
             }
             let! connId = connRepo.CreateAsync(connection)
 

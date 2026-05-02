@@ -2,6 +2,7 @@ open System
 open System.IO
 open System.Net.Http
 open System.Net.Http.Headers
+open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Threading.Tasks
@@ -67,7 +68,9 @@ let requireServiceToken (next: HttpHandler) : HttpHandler = fun ctx ->
             else
                 ""
 
-        if token <> config.StewardServiceToken then
+        let expectedTokenBytes = System.Text.Encoding.UTF8.GetBytes(config.StewardServiceToken)
+        let actualTokenBytes = System.Text.Encoding.UTF8.GetBytes(token)
+        if expectedTokenBytes.Length <> actualTokenBytes.Length || not (CryptographicOperations.FixedTimeEquals(expectedTokenBytes, actualTokenBytes)) then
             ctx.Response.StatusCode <- 401
             do! Response.ofJson {| error = "Unauthorized" |} ctx
         else

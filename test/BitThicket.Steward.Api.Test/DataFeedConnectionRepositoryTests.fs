@@ -73,6 +73,7 @@ type DataFeedConnectionRepositoryTests() =
                   CredentialRef = "prv_plaid_test"
                   Status = ConnectionStatus.Active
                   LinkedAccountIds = []
+                  LastSyncedAt = None
                   CreatedAt = DateTimeOffset.UtcNow
                   UpdatedAt = DateTimeOffset.UtcNow }
 
@@ -96,6 +97,7 @@ type DataFeedConnectionRepositoryTests() =
                   CredentialRef = "prv_plaid_test2"
                   Status = ConnectionStatus.Active
                   LinkedAccountIds = [Guid.NewGuid()]
+                  LastSyncedAt = None
                   CreatedAt = DateTimeOffset.UtcNow
                   UpdatedAt = DateTimeOffset.UtcNow }
 
@@ -124,6 +126,7 @@ type DataFeedConnectionRepositoryTests() =
                   CredentialRef = "prv_plaid_test3"
                   Status = ConnectionStatus.Active
                   LinkedAccountIds = []
+                  LastSyncedAt = None
                   CreatedAt = DateTimeOffset.UtcNow
                   UpdatedAt = DateTimeOffset.UtcNow }
 
@@ -149,6 +152,7 @@ type DataFeedConnectionRepositoryTests() =
                   CredentialRef = "prv_plaid_test4"
                   Status = ConnectionStatus.Active
                   LinkedAccountIds = []
+                  LastSyncedAt = None
                   CreatedAt = DateTimeOffset.UtcNow
                   UpdatedAt = DateTimeOffset.UtcNow }
 

@@ -1,6 +1,6 @@
 -- 0027-akoya-sync-watermark.sql
--- Add provider_metadata JSON field to data_feed_connections for storing
--- per-connection sync watermark state (Akoya: lastSyncedAt).
+-- Documents the last_synced_at column (already added by 0024-sync-coordinator.sql)
+-- and provides a SECURITY DEFINER helper for updating it from ingestion services.
 -- See STE-36.
 
 -- Already added to schema via sync-coordinator migration; this migration

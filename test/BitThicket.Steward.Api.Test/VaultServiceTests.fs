@@ -116,7 +116,7 @@ type AesGcm256Tests() =
     member _.``Encrypt-decrypt round-trip succeeds``() =
         let key = RandomNumberGenerator.GetBytes(32)
         let plaintext = "s3cr3t-t0k3n-12345" |> Encoding.UTF8.GetBytes
-        let nonce, ciphertext, _ = AesGcm256.encrypt key plaintext
+        let nonce, ciphertext, _ = AesGcm256.encrypt key 1 plaintext
         let decrypted = AesGcm256.decrypt key nonce ciphertext
         test <@ plaintext = decrypted @>
 
@@ -125,7 +125,7 @@ type AesGcm256Tests() =
         let key = RandomNumberGenerator.GetBytes(32)
         let wrongKey = RandomNumberGenerator.GetBytes(32)
         let plaintext = "s3cr3t-t0k3n-12345" |> Encoding.UTF8.GetBytes
-        let nonce, ciphertext, _ = AesGcm256.encrypt key plaintext
+        let nonce, ciphertext, _ = AesGcm256.encrypt key 1 plaintext
         let exn = Assert.Throws<VaultDecryptionException>(fun () -> AesGcm256.decrypt wrongKey nonce ciphertext |> ignore)
         test <@ exn.Message.Contains("Key mismatch") || exn.Message.Contains("Decryption failed") @>
 
@@ -133,7 +133,7 @@ type AesGcm256Tests() =
     member _.``Decrypt with tampered ciphertext throws VaultDecryptionException``() =
         let key = RandomNumberGenerator.GetBytes(32)
         let plaintext = "s3cr3t-t0k3n-12345" |> Encoding.UTF8.GetBytes
-        let nonce, ciphertext, _ = AesGcm256.encrypt key plaintext
+        let nonce, ciphertext, _ = AesGcm256.encrypt key 1 plaintext
         ciphertext.[0] <- ciphertext.[0] + 1uy
         let exn = Assert.Throws<VaultDecryptionException>(fun () -> AesGcm256.decrypt key nonce ciphertext |> ignore)
         test <@ exn.Message.Contains("Key mismatch") || exn.Message.Contains("Decryption failed") @>
@@ -242,7 +242,7 @@ type VaultServiceIntegrationTests() =
                     ProviderSpecific = None
                 }
                 let plaintext = CredentialEnvelope.toBytes envelope
-                let nonce, ciphertext, _ = AesGcm256.encrypt oldKey plaintext
+                let nonce, ciphertext, _ = AesGcm256.encrypt oldKey 0 plaintext
 
                 let guidPart = Guid.NewGuid().ToString("N")
                 let ref = $"prv_test_{guidPart}"

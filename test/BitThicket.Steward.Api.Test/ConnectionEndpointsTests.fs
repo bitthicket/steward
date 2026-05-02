@@ -128,6 +128,7 @@ let private createConnection (factory: IDbConnectionFactory) (tenantId: Guid) =
           CredentialRef = "prv_test"
           Status = ConnectionStatus.Active
           LinkedAccountIds = []
+          LastSyncedAt = None
           CreatedAt = DateTimeOffset.UtcNow
           UpdatedAt = DateTimeOffset.UtcNow }
     repo.CreateAsync(conn).GetAwaiter().GetResult() |> ignore

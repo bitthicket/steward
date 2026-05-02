@@ -83,7 +83,7 @@ module AesGcm256 =
         RandomNumberGenerator.GetBytes(nonceSize)
 
     /// Encrypt plaintext. Returns (nonce, ciphertextWithTag, keyVersion).
-    let encrypt (key: byte[]) (plaintext: byte[]) : byte[] * byte[] * int =
+    let encrypt (key: byte[]) (keyVersion: int) (plaintext: byte[]) : byte[] * byte[] * int =
         use aes = new AesGcm(key, tagSize)
         let nonce = randomNonce ()
         let ciphertext = Array.zeroCreate<byte> plaintext.Length
@@ -93,7 +93,7 @@ module AesGcm256 =
         let combined = Array.zeroCreate<byte> (ciphertext.Length + tagSize)
         Buffer.BlockCopy(ciphertext, 0, combined, 0, ciphertext.Length)
         Buffer.BlockCopy(tag, 0, combined, ciphertext.Length, tagSize)
-        (nonce, combined, 0)
+        (nonce, combined, keyVersion)
 
     /// Decrypt ciphertext (with tag appended). Throws VaultDecryptionException on failure.
     let decrypt (key: byte[]) (nonce: byte[]) (ciphertextWithTag: byte[]) : byte[] =
@@ -279,7 +279,7 @@ type VaultService(factory: BitThicket.Steward.Api.IDbConnectionFactory) =
 
                 match currentKey.Value with
                 | VaultKey.Current(keyVersion, key) ->
-                    let nonce, ciphertext, _ = AesGcm256.encrypt key plaintext
+                    let nonce, ciphertext, _ = AesGcm256.encrypt key keyVersion plaintext
 
                     let row: VaultRow = {
                         Id = Guid.NewGuid()
@@ -338,7 +338,7 @@ type VaultService(factory: BitThicket.Steward.Api.IDbConnectionFactory) =
                         // Already current key — nothing to do
                         return true
                     | VaultKey.Current(newVersion, newKey) ->
-                        let newNonce, newCiphertext, _ = AesGcm256.encrypt newKey plaintext
+                        let newNonce, newCiphertext, _ = AesGcm256.encrypt newKey newVersion plaintext
                         return! VaultRepository.updateCiphertext conn row.Id newCiphertext newNonce newVersion
                     | _ ->
                         return failwith "Unreachable: current key resolution failed."
